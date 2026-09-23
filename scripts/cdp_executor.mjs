@@ -12,14 +12,16 @@ import http from 'http';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import crypto from 'crypto';
 
 // 配置
 const CDP_HOST = process.env.CDP_HOST || '127.0.0.1';
 const CDP_PORT = process.env.CDP_PORT || '9222';
 const CDP_URL = `http://${CDP_HOST}:${CDP_PORT}`;
 
-// 标签追踪文件路径
-const TRACKER_FILE = path.join(os.tmpdir(), 'cdp-created-tabs.json');
+// 按浏览器实例隔离标签追踪，避免不同配置或重启后的旧 ID 互相影响。
+let trackerFile = null;
+let trackerLockFile = null;
 
 // WebSocket 通信
 let ws = null;
@@ -62,6 +64,14 @@ function getHttp(url) {
 async function connect() {
   const version = await getHttp(`${CDP_URL}/json/version`);
   const wsUrl = version.webSocketDebuggerUrl;
+  const browserWsUrl = new URL(wsUrl);
+  const browserInstanceId = browserWsUrl.pathname.split('/').filter(Boolean).pop() || 'unknown';
+  const trackerScope = crypto.createHash('sha256')
+    .update(`${browserWsUrl.host}|${version.Browser}|${browserInstanceId}`)
+    .digest('hex')
+    .slice(0, 20);
+  trackerFile = path.join(os.tmpdir(), `cdp-created-tabs-${trackerScope}.json`);
+  trackerLockFile = `${trackerFile}.lock`;
 
   ws = new WebSocket(wsUrl);
   await new Promise((resolve, reject) => {
@@ -130,18 +140,61 @@ async function captureScreenshot(sessionId, format = 'png') {
 
 function loadTrackedTabs() {
   try {
-    if (fs.existsSync(TRACKER_FILE)) {
-      const data = fs.readFileSync(TRACKER_FILE, 'utf-8');
-      return JSON.parse(data);
+    if (fs.existsSync(trackerFile)) {
+      const data = JSON.parse(fs.readFileSync(trackerFile, 'utf-8'));
+      return Array.isArray(data) ? data.filter(id => typeof id === 'string') : [];
     }
   } catch {}
   return [];
 }
 
 function saveTrackedTabs(tabs) {
+  const tempFile = `${trackerFile}.${process.pid}.${Date.now()}.tmp`;
+  fs.writeFileSync(tempFile, JSON.stringify(tabs, null, 2));
+  fs.renameSync(tempFile, trackerFile);
+}
+
+function isProcessAlive(pid) {
+  if (!Number.isInteger(pid) || pid < 1) return false;
   try {
-    fs.writeFileSync(TRACKER_FILE, JSON.stringify(tabs, null, 2));
-  } catch {}
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === 'EPERM';
+  }
+}
+
+async function withTrackerLock(operation) {
+  if (!trackerLockFile) throw new Error('标签追踪尚未初始化');
+  const deadline = Date.now() + 15000;
+  let lockFd;
+
+  while (!lockFd) {
+    try {
+      lockFd = fs.openSync(trackerLockFile, 'wx');
+      fs.writeFileSync(lockFd, JSON.stringify({ pid: process.pid, createdAt: Date.now() }));
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      try {
+        const lock = JSON.parse(fs.readFileSync(trackerLockFile, 'utf-8'));
+        if (!isProcessAlive(lock.pid) && Date.now() - fs.statSync(trackerLockFile).mtimeMs > 30000) {
+          fs.unlinkSync(trackerLockFile);
+          continue;
+        }
+      } catch (readError) {
+        if (readError.code === 'ENOENT') continue;
+      }
+      if (Date.now() >= deadline) throw new Error('等待标签追踪锁超时');
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+  }
+
+  try {
+    return await operation();
+  } finally {
+    fs.closeSync(lockFd);
+    try { fs.unlinkSync(trackerLockFile); } catch {}
+  }
 }
 
 function addTrackedTab(targetId) {
@@ -175,18 +228,20 @@ async function closeTrackedTabs(keepIds = []) {
 }
 
 async function prepareTarget(url, background = true) {
-  const trackedIds = loadTrackedTabs();
-  const targets = await getTargets();
-  const reusable = targets.find(target =>
-    target.type === 'page' && trackedIds.includes(target.id) && target.url === url
-  );
+  return withTrackerLock(async () => {
+    const trackedIds = loadTrackedTabs();
+    const targets = await getTargets();
+    const reusable = targets.find(target =>
+      target.type === 'page' && trackedIds.includes(target.id) && target.url === url
+    );
 
-  const closed = await closeTrackedTabs(reusable ? [reusable.id] : []);
-  if (reusable) return { targetId: reusable.id, reused: true, closed };
+    const closed = await closeTrackedTabs(reusable ? [reusable.id] : []);
+    if (reusable) return { targetId: reusable.id, reused: true, closed };
 
-  const targetId = await createTarget(url, background);
-  addTrackedTab(targetId);
-  return { targetId, reused: false, closed };
+    const targetId = await createTarget(url, background);
+    addTrackedTab(targetId);
+    return { targetId, reused: false, closed };
+  });
 }
 
 // ========== 命令实现 ==========
@@ -262,47 +317,14 @@ async function cmdScreenshot(url, outputPath, options = {}) {
 }
 
 async function cmdTabs(action, args = []) {
-  const targets = await getTargets();
-  const pages = targets.filter(t => t.type === 'page');
-
   if (action === 'list') {
+    const targets = await getTargets();
+    const pages = targets.filter(t => t.type === 'page');
     return pages.map(p => ({
       id: p.id,
       title: p.title,
       url: p.url
     }));
-  }
-
-  if (action === 'close') {
-    const pattern = args[0] || '';
-    const trackedIds = new Set(loadTrackedTabs());
-    let closed = 0;
-    const closedIds = new Set();
-    for (const p of pages) {
-      if (trackedIds.has(p.id) && p.url.includes(pattern)) {
-        if (await closeTarget(p.id)) {
-          closed++;
-          closedIds.add(p.id);
-        }
-      }
-    }
-    saveTrackedTabs(loadTrackedTabs().filter(id => !closedIds.has(id)));
-    return { closed, pattern, scope: 'tracked tabs only' };
-  }
-
-  if (action === 'close-id') {
-    const targetId = args[0];
-    if (!targetId || !pages.some(page => page.id === targetId)) {
-      throw new Error('标签不存在；close-id 只会关闭明确指定的标签 ID');
-    }
-    const closed = await closeTarget(targetId);
-    if (closed) saveTrackedTabs(loadTrackedTabs().filter(id => id !== targetId));
-    return { closed: Number(closed), targetId };
-  }
-
-  if (action === 'close-tracked') {
-    const closed = await closeTrackedTabs();
-    return { closedTracked: closed };
   }
 
   if (action === 'open') {
@@ -312,7 +334,44 @@ async function cmdTabs(action, args = []) {
     return { ...target, url, background };
   }
 
-  throw new Error(`未知的 tabs 操作: ${action}`);
+  return withTrackerLock(async () => {
+    const targets = await getTargets();
+    const pages = targets.filter(t => t.type === 'page');
+
+    if (action === 'close') {
+      const pattern = args[0] || '';
+      const trackedIds = new Set(loadTrackedTabs());
+      let closed = 0;
+      const closedIds = new Set();
+      for (const p of pages) {
+        if (trackedIds.has(p.id) && p.url.includes(pattern)) {
+          if (await closeTarget(p.id)) {
+            closed++;
+            closedIds.add(p.id);
+          }
+        }
+      }
+      saveTrackedTabs(loadTrackedTabs().filter(id => !closedIds.has(id)));
+      return { closed, pattern, scope: 'tracked tabs only' };
+    }
+
+    if (action === 'close-id') {
+      const targetId = args[0];
+      if (!targetId || !pages.some(page => page.id === targetId)) {
+        throw new Error('标签不存在；close-id 只会关闭明确指定的标签 ID');
+      }
+      const closed = await closeTarget(targetId);
+      if (closed) saveTrackedTabs(loadTrackedTabs().filter(id => id !== targetId));
+      return { closed: Number(closed), targetId };
+    }
+
+    if (action === 'close-tracked') {
+      const closed = await closeTrackedTabs();
+      return { closedTracked: closed };
+    }
+
+    throw new Error(`未知的 tabs 操作: ${action}`);
+  });
 }
 
 async function cmdPing() {
@@ -332,8 +391,10 @@ async function cmdPing() {
 }
 
 async function cmdCleanup(keepIds = []) {
-  const closed = await closeTrackedTabs(keepIds);
-  return { cleanedUp: closed, keptTracked: keepIds };
+  return withTrackerLock(async () => {
+    const closed = await closeTrackedTabs(keepIds);
+    return { cleanedUp: closed, keptTracked: keepIds };
+  });
 }
 
 // ========== 主程序 ==========
@@ -364,7 +425,7 @@ CDP 浏览器自动化执行器
 特性:
   - 只自动关闭本脚本创建并追踪的标签
   - 相同 URL 优先复用自有标签；清理其他自有标签
-  - 通过临时文件追踪创建的标签 ID
+  - 按浏览器会话隔离追踪文件，并使用文件锁协调并发操作
   - 环境变量 CDP_HOST / CDP_PORT 可配置连接地址
 
 环境变量:
