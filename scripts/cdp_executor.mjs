@@ -5,7 +5,7 @@
  * 通过 Chrome DevTools Protocol 连接已运行的浏览器
  * 使用 Node.js 内置 WebSocket API，无需额外依赖
  *
- * 特性：每次打开新标签前自动关闭之前创建的标签
+ * 特性：复用匹配的自有标签，并仅清理不再使用的自有标签
  */
 
 import http from 'http';
@@ -420,7 +420,7 @@ CDP 浏览器自动化执行器
 
       case 'tabs': {
         const action = args[1];
-        if (!action) throw new Error('缺少 tabs 操作 (list/close/close-tracked/open)');
+        if (!action) throw new Error('缺少 tabs 操作 (list/close/close-id/close-tracked/open)');
         result = await cmdTabs(action, args.slice(2));
         break;
       }
