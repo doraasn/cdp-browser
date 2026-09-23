@@ -1,8 +1,8 @@
 ---
 name: cdp-browser
-description: "通过 Chrome DevTools Protocol (CDP) 连接已运行的浏览器，进行页面自动化、数据提取和标签管理。当用户要求连接调试端口、读取网页、执行页面脚本、截图或管理标签时使用。"
-official: false
-version: 1.3.0
+description: "通过 Chrome DevTools Protocol (CDP) 连接已运行的浏览器，执行页面快照、交互、数据提取和标签管理。当用户要求连接调试端口、读取网页、操作页面、截图或管理标签时使用。"
+metadata:
+  version: "1.4.0"
 ---
 
 # CDP 浏览器自动化
@@ -30,6 +30,12 @@ node scripts/cdp_executor.mjs ping
 node scripts/cdp_executor.mjs extract <url> [--wait <ms>]
 node scripts/cdp_executor.mjs eval <url> <js-code> [--wait <ms>]
 node scripts/cdp_executor.mjs screenshot <url> <output-path> [--wait <ms>]
+node scripts/cdp_executor.mjs snapshot <url> [--max-nodes <n>]
+node scripts/cdp_executor.mjs wait-for <url> <selector> [--timeout <ms>]
+node scripts/cdp_executor.mjs click <url|-> <selector> [--timeout <ms>] [--target <id>]
+node scripts/cdp_executor.mjs fill <url|-> <selector> <value> [--timeout <ms>] [--target <id>]
+node scripts/cdp_executor.mjs press <url|-> <selector> <key> [--timeout <ms>] [--target <id>]
+node scripts/cdp_executor.mjs scroll <url|-> <selector> <direction> [amount] [--timeout <ms>] [--target <id>]
 node scripts/cdp_executor.mjs tabs list
 node scripts/cdp_executor.mjs tabs open <url> [--background]
 node scripts/cdp_executor.mjs cleanup [--keep <id,id,...>]
@@ -41,3 +47,14 @@ node scripts/cdp_executor.mjs cleanup [--keep <id,id,...>]
 - 打开页面时优先复用 URL 完全相同的自有标签；关闭其余自有标签。没有可复用标签时才创建。
 - 任务结束后，若需把标签留给用户查看，调用 `cleanup --keep <targetId,...>` 保留目标标签并关闭其余自有标签。
 - 标签追踪按浏览器调试会话隔离，并发修改使用文件锁；不得把旧版共享追踪文件里的标签 ID 当作本会话自有标签。
+- 页面命令可用 `--target <id>` 精确选择用户指定的标签；每次操作前刷新标签列表，过期 ID 会报错并停止。URL 位置传 `-` 表示不导航当前标签。
+- `snapshot` 读取精简无障碍树；`wait-for` 等待可见 CSS selector；`click`、`fill`、`press`、`scroll` 会等待唯一、可见的 selector 匹配项（默认 10 秒，可传 `--timeout`）。
+- 点击提交、删除、购买、发送等会造成外部变更的控件前，必须取得用户明确授权；填写内容本身不代表允许提交。
+
+示例：
+
+```bash
+node scripts/cdp_executor.mjs snapshot - --target TARGET_ID
+node scripts/cdp_executor.mjs click - "button.search" --target TARGET_ID
+node scripts/cdp_executor.mjs fill - "input[name=q]" "CDP" --target TARGET_ID
+```
