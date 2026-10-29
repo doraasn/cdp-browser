@@ -50,7 +50,7 @@ macOS 示例：
 "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --remote-debugging-port=9222 --user-data-dir=/tmp/chrome-cdp
 ```
 
-开启后先验证：`node scripts/cdp_executor.mjs ping`，或浏览器访问 `http://127.0.0.1:9222/json/version`。**ping 不通就继续让用户处理，不要声称已经连上或已经读到页面**。端口被占用时换一个端口，并用 `CDP_PORT` 指定。
+开启后先验证：`node scripts/cdp_executor.mjs ping`，或浏览器访问 `http://127.0.0.1:9222/json/version`。**ping 不通就继续让用户处理，不要声称已经连上或已经读到页面**。端口被占用时换一个端口，并用 `CDP_PORT` 指定。CentBrowser 等其它 Chromium 内核浏览器同理，把上面的 exe 路径换成对应程序即可。
 
 ## 首次连接与授权（硬性规则）
 
