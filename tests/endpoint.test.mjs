@@ -23,6 +23,7 @@ test('解析进程命令行时区分 headless 与有界面实例', () => {
   const text = [
     '"C:\\CentBrowser\\chrome.exe" --remote-debugging-port=9222 --remote-allow-origins=*',
     '"C:\\Edge\\msedge.exe" --headless=new --remote-debugging-port=9223 --user-data-dir=C:/Projects/x/temp',
+    '"C:\\Edge\\msedge.exe" --type=renderer --remote-debugging-port=9223 --user-data-dir=C:/Projects/x/temp',
     '"C:\\Chrome\\chrome.exe" --remote-debugging-port=9222 --type=renderer',
   ].join('\n');
 

@@ -23,17 +23,19 @@ export function getVersion(port, host = '127.0.0.1', timeout = 1200) {
   });
 }
 
-// 从进程命令行里解析出 [{ port, headless }]：同一端口只要有一个非 headless 进程就按有界面算。
+// 从进程命令行里解析出 [{ port, headless }]：只看浏览器主进程（带 --type= 的是渲染/工具子进程），
+// 同一端口只要有一个 headless 进程就按 headless 处理。
 export function parseRunningBrowsers(text) {
   const byPort = new Map();
   for (const line of String(text).split(/\r?\n/)) {
+    if (/--type=/.test(line)) continue;
     const match = line.match(/--remote-debugging-port=(\d{1,5})/);
     if (!match) continue;
     const port = Number(match[1]);
     if (!Number.isInteger(port) || port <= 0 || port >= 65536) continue;
     const headless = /--headless(?:\s|=|$)/.test(line);
     const previous = byPort.get(port);
-    byPort.set(port, previous === undefined ? headless : (previous && headless));
+    byPort.set(port, previous === undefined ? headless : (previous || headless));
   }
   return [...byPort.entries()].map(([port, headless]) => ({ port, headless }));
 }
