@@ -132,7 +132,7 @@ node "$SKILLS_ROOT/cdp-browser/scripts/cdp_executor.mjs" <command> [args...]
 node "$SKILLS_ROOT/cdp-browser/scripts/launch_debug_browser.mjs"   # 一个端口都没发现时，起独立调试实例
 ```
 
-在技能目录内执行时可简写为 `node scripts/cdp_executor.mjs <command> [args...]`。所有命令输出 JSON；失败时以非零状态退出。标签相关输出字段：`targetId`、`newTab`（本次是否新建）、`reusedTab`（是否复用）。
+在技能目录内执行时可简写为 `node scripts/cdp_executor.mjs <command> [args...]`。成功结果输出到 **stdout**，失败信息输出到 **stderr**，都是 JSON；失败时退出码非零（`ping` 连不上也返回 1，同时 stdout 里有 `connected=false`）。标签相关输出字段：`targetId`、`newTab`（本次是否新建）、`reusedTab`（是否复用）。
 
 常用命令：
 
