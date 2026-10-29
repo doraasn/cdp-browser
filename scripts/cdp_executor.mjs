@@ -5,7 +5,7 @@
  * 通过 Chrome DevTools Protocol 连接已运行的浏览器
  * 使用 Node.js 内置 WebSocket API，无需额外依赖
  *
- * 特性：复用匹配的自有标签，并仅清理不再使用的自有标签
+ * 特性：默认后台新建、按 URL 复用自有标签、任务结束后统一清理；不抢占焦点，不关闭用户标签
  */
 
 import http from 'http';
@@ -101,13 +101,35 @@ async function getTargets() {
   return await getHttp(`${CDP_URL}/json`);
 }
 
+// Chrome 111+ 只接受 PUT /json/close/<id>，旧版本用 GET；两者都试，按状态码判定结果。
+function requestClose(targetId, method) {
+  return new Promise((resolve, reject) => {
+    const request = http.request({
+      host: CDP_HOST,
+      port: CDP_PORT,
+      path: `/json/close/${targetId}`,
+      method
+    }, response => {
+      response.resume();
+      response.on('end', () => resolve(response.statusCode));
+    });
+    request.setTimeout(5000, () => request.destroy(new Error('关闭标签超时')));
+    request.on('error', reject);
+    request.end();
+  });
+}
+
+// 返回 'closed' | 'gone' | 'failed'。
 async function closeTarget(targetId) {
-  try {
-    await getHttp(`${CDP_URL}/json/close/${targetId}`);
-    return true;
-  } catch {
-    return false;
+  let statusCode;
+  for (const method of ['PUT', 'GET']) {
+    try {
+      statusCode = await requestClose(targetId, method);
+      if (statusCode >= 200 && statusCode < 300) return 'closed';
+      if (statusCode === 404) return 'gone';
+    } catch {}
   }
+  return statusCode === 404 ? 'gone' : 'failed';
 }
 
 async function createTarget(url, background = true) {
@@ -217,35 +239,38 @@ function addTrackedTab(targetId) {
 
 async function closeTrackedTabs(keepIds = []) {
   const trackedTabs = loadTrackedTabs();
-  let closedCount = 0;
   const keep = new Set(keepIds);
   const remaining = [];
+  const failed = [];
+  let closedCount = 0;
 
   for (const targetId of trackedTabs) {
     if (keep.has(targetId)) {
       remaining.push(targetId);
       continue;
     }
-    if (await closeTarget(targetId)) {
-      closedCount++;
-    } else {
-      // 已关闭或失效的目标不再保留在追踪文件中。
-    }
+    const outcome = await closeTarget(targetId);
+    if (outcome === 'closed') closedCount++;
+    else if (outcome === 'failed') failed.push(targetId);
+    // closed / gone 都不再保留；failed 留待下次清理重试。
   }
 
-  saveTrackedTabs(remaining);
-  return closedCount;
+  saveTrackedTabs(remaining.concat(failed));
+  return { closed: closedCount, failed };
 }
 
-async function prepareTarget(url, background = true, requestedTargetId = null) {
+async function prepareTarget(url, options = {}) {
+  const { targetId: requestedTargetId = null, background = true } = options;
+
   return withTrackerLock(async () => {
     const trackedIds = loadTrackedTabs();
     const targets = await getTargets();
+
     if (requestedTargetId) {
       const selected = targets.find(target => target.type === 'page' && target.id === requestedTargetId);
       if (!selected) throw new Error('指定的标签 ID 已失效，请重新运行 tabs list 获取当前 ID');
 
-      const closed = await closeTrackedTabs(trackedIds.includes(selected.id) ? [selected.id] : []);
+      // 用户指定的标签：只导航、不纳入追踪，任务结束后也不会被清理。
       const shouldNavigate = url && url !== '-' && selected.url !== url;
       if (shouldNavigate) {
         const sessionId = await attachToTarget(selected.id);
@@ -255,21 +280,46 @@ async function prepareTarget(url, background = true, requestedTargetId = null) {
           await detachFromTarget(sessionId);
         }
       }
-      return { targetId: selected.id, reused: true, closed, navigated: Boolean(shouldNavigate) };
+      return {
+        targetId: selected.id,
+        reused: true,
+        created: false,
+        tracked: trackedIds.includes(selected.id),
+        navigated: Boolean(shouldNavigate)
+      };
     }
 
     if (!url || url === '-') throw new Error('未指定 URL 或 --target 标签 ID');
+
+    // 同一 URL 的自有标签直接复用，避免重复新建/关闭造成抖动。
     const reusable = targets.find(target =>
       target.type === 'page' && trackedIds.includes(target.id) && target.url === url
     );
-
-    const closed = await closeTrackedTabs(reusable ? [reusable.id] : []);
-    if (reusable) return { targetId: reusable.id, reused: true, closed };
+    if (reusable) {
+      return { targetId: reusable.id, reused: true, created: false, tracked: true, navigated: false };
+    }
 
     const targetId = await createTarget(url, background);
     addTrackedTab(targetId);
-    return { targetId, reused: false, closed };
+    return { targetId, reused: false, created: true, tracked: true, navigated: true };
   });
+}
+
+async function focusTarget(targetId) {
+  const sessionId = await attachToTarget(targetId);
+  try {
+    await cdpSend('Page.bringToFront', {}, sessionId);
+  } finally {
+    await detachFromTarget(sessionId);
+  }
+}
+
+// 统一入口：默认后台执行；只有显式 --foreground 才把标签切到前台。
+async function ensureTarget(url, options = {}) {
+  const background = options.background ?? !options.foreground;
+  const target = await prepareTarget(url, { ...options, background });
+  if (options.foreground) await focusTarget(target.targetId);
+  return target;
 }
 
 async function waitForSelector(sessionId, selector, timeout = 10000) {
@@ -305,7 +355,7 @@ async function waitForSelector(sessionId, selector, timeout = 10000) {
 
 async function cmdExtract(url, options = {}) {
   const { wait = 5000 } = options;
-  const target = await prepareTarget(url, true, options.targetId);
+  const target = await ensureTarget(url, options);
   const { targetId } = target;
 
   await new Promise(r => setTimeout(r, wait));
@@ -324,9 +374,7 @@ async function cmdExtract(url, options = {}) {
         title: document.title,
         url: document.location.href,
         lines: pageLines.slice(0, 200),
-        totalLines: lines.length,
-        closedPreviousTabs: ${target.closed},
-        reusedTab: ${target.reused}
+        totalLines: lines.length
       });
     })()
   `;
@@ -334,12 +382,18 @@ async function cmdExtract(url, options = {}) {
   const result = await evaluate(script, sessionId);
   await detachFromTarget(sessionId);
 
-  return JSON.parse(result || '{}');
+  // 标签状态由执行器返回，避免页面脚本覆盖。
+  return {
+    ...JSON.parse(result || '{}'),
+    targetId,
+    newTab: target.created,
+    reusedTab: target.reused
+  };
 }
 
 async function cmdEval(url, jsCode, options = {}) {
   const { wait = 3000 } = options;
-  const target = await prepareTarget(url, true, options.targetId);
+  const target = await ensureTarget(url, options);
   const { targetId } = target;
 
   await new Promise(r => setTimeout(r, wait));
@@ -348,13 +402,13 @@ async function cmdEval(url, jsCode, options = {}) {
   const result = await evaluate(jsCode, sessionId);
   await detachFromTarget(sessionId);
 
-  return { result, closedPreviousTabs: target.closed, reusedTab: target.reused };
+  return { result, newTab: target.created, reusedTab: target.reused };
 }
 
 async function cmdScreenshot(url, outputPath, options = {}) {
   const { wait = 3000 } = options;
 
-  const target = await prepareTarget(url, true, options.targetId);
+  const target = await ensureTarget(url, options);
   const { targetId } = target;
 
   await new Promise(r => setTimeout(r, wait));
@@ -368,19 +422,19 @@ async function cmdScreenshot(url, outputPath, options = {}) {
   return {
     path: outputPath,
     size: Buffer.from(data, 'base64').length,
-    closedPreviousTabs: target.closed,
+    newTab: target.created,
     reusedTab: target.reused
   };
 }
 
 async function cmdSnapshot(url, options = {}) {
   const { wait = 500, maxNodes = 500 } = options;
-  const target = await prepareTarget(url, true, options.targetId);
+  const target = await ensureTarget(url, options);
   if (wait > 0) await new Promise(resolve => setTimeout(resolve, wait));
   const sessionId = await attachToTarget(target.targetId);
   try {
     const snapshot = await getPageSnapshot(cdpSend, sessionId, { maxNodes });
-    return { ...snapshot, targetId: target.targetId, reusedTab: target.reused, closedPreviousTabs: target.closed };
+    return { ...snapshot, targetId: target.targetId, reusedTab: target.reused, newTab: target.created };
   } finally {
     await detachFromTarget(sessionId);
   }
@@ -388,18 +442,18 @@ async function cmdSnapshot(url, options = {}) {
 
 async function cmdWaitFor(url, selector, options = {}) {
   const { timeout = 10000 } = options;
-  const target = await prepareTarget(url, true, options.targetId);
+  const target = await ensureTarget(url, options);
   const sessionId = await attachToTarget(target.targetId);
   try {
     const element = await waitForSelector(sessionId, selector, timeout);
-    return { targetId: target.targetId, selector, element, reusedTab: target.reused, closedPreviousTabs: target.closed };
+    return { targetId: target.targetId, selector, element, reusedTab: target.reused, newTab: target.created };
   } finally {
     await detachFromTarget(sessionId);
   }
 }
 
 async function cmdElementAction(action, url, selector, values = [], options = {}) {
-  const target = await prepareTarget(url, true, options.targetId);
+  const target = await ensureTarget(url, options);
   const sessionId = await attachToTarget(target.targetId);
   try {
     await waitForSelector(sessionId, selector, options.timeout ?? 10000);
@@ -410,13 +464,13 @@ async function cmdElementAction(action, url, selector, values = [], options = {}
     else if (action === 'press') result = await actions.press(selector, values[0]);
     else if (action === 'scroll') result = await actions.scroll(selector, { direction: values[0], amount: Number(values[1]) });
     else throw new Error(`未知页面操作: ${action}`);
-    return { ...result, targetId: target.targetId, reusedTab: target.reused, closedPreviousTabs: target.closed };
+    return { ...result, targetId: target.targetId, reusedTab: target.reused, newTab: target.created };
   } finally {
     await detachFromTarget(sessionId);
   }
 }
 
-function parseOptions(args, allowed) {
+function parseOptions(args, allowed, flags = {}) {
   const positionals = [];
   const options = {};
   for (let index = 0; index < args.length; index++) {
@@ -425,6 +479,8 @@ function parseOptions(args, allowed) {
       const value = args[++index];
       if (value === undefined || value.startsWith('--')) throw new Error(`${arg} 缺少参数`);
       options[allowed[arg]] = value;
+    } else if (Object.hasOwn(flags, arg)) {
+      options[flags[arg]] = true;
     } else if (arg.startsWith('--')) {
       throw new Error(`未知选项: ${arg}`);
     } else {
@@ -457,10 +513,20 @@ async function cmdTabs(action, args = []) {
   }
 
   if (action === 'open') {
-    const background = args.includes('--background') || args.includes('-b');
-    const url = args.find(arg => !arg.startsWith('-')) || 'about:blank';
-    const target = await prepareTarget(url, background);
-    return { ...target, url, background };
+    const foreground = args.includes('--foreground') || args.includes('-f');
+    const urls = args.filter(arg => !arg.startsWith('-'));
+    const list = urls.length ? urls : ['about:blank'];
+    const opened = [];
+
+    // 可一次开多个后台标签，供并行任务使用。
+    for (const url of list) {
+      const target = await ensureTarget(url, { foreground });
+      opened.push({ targetId: target.targetId, url, reusedTab: target.reused, newTab: target.created });
+    }
+
+    return opened.length === 1
+      ? { ...opened[0], background: !foreground }
+      : { tabs: opened, background: !foreground };
   }
 
   return withTrackerLock(async () => {
@@ -471,17 +537,18 @@ async function cmdTabs(action, args = []) {
       const pattern = args[0] || '';
       const trackedIds = new Set(loadTrackedTabs());
       let closed = 0;
+      const failed = [];
       const closedIds = new Set();
       for (const p of pages) {
         if (trackedIds.has(p.id) && p.url.includes(pattern)) {
-          if (await closeTarget(p.id)) {
-            closed++;
-            closedIds.add(p.id);
-          }
+          const outcome = await closeTarget(p.id);
+          if (outcome === 'closed') closed++;
+          if (outcome === 'failed') failed.push(p.id);
+          if (outcome !== 'failed') closedIds.add(p.id);
         }
       }
       saveTrackedTabs(loadTrackedTabs().filter(id => !closedIds.has(id)));
-      return { closed, pattern, scope: 'tracked tabs only' };
+      return { closed, pattern, failed, scope: 'tracked tabs only' };
     }
 
     if (action === 'close-id') {
@@ -489,14 +556,15 @@ async function cmdTabs(action, args = []) {
       if (!targetId || !pages.some(page => page.id === targetId)) {
         throw new Error('标签不存在；close-id 只会关闭明确指定的标签 ID');
       }
-      const closed = await closeTarget(targetId);
-      if (closed) saveTrackedTabs(loadTrackedTabs().filter(id => id !== targetId));
-      return { closed: Number(closed), targetId };
+      const outcome = await closeTarget(targetId);
+      if (outcome === 'failed') throw new Error(`关闭标签失败: ${targetId}`);
+      if (outcome === 'closed') saveTrackedTabs(loadTrackedTabs().filter(id => id !== targetId));
+      return { closed: Number(outcome === 'closed'), targetId };
     }
 
     if (action === 'close-tracked') {
-      const closed = await closeTrackedTabs();
-      return { closedTracked: closed };
+      const result = await closeTrackedTabs();
+      return { closedTracked: result.closed, failed: result.failed };
     }
 
     throw new Error(`未知的 tabs 操作: ${action}`);
@@ -521,8 +589,8 @@ async function cmdPing() {
 
 async function cmdCleanup(keepIds = []) {
   return withTrackerLock(async () => {
-    const closed = await closeTrackedTabs(keepIds);
-    return { cleanedUp: closed, keptTracked: keepIds };
+    const result = await closeTrackedTabs(keepIds);
+    return { cleanedUp: result.closed, failed: result.failed, keptTracked: keepIds };
   });
 }
 
@@ -540,27 +608,29 @@ CDP 浏览器自动化执行器
   node cdp_executor.mjs <command> [args...]
 
 命令:
-  extract <url|-> [--wait <ms>] [--target <id>]  提取页面文本
-  eval <url|-> <js-code> [--wait <ms>] [--target <id>]  执行 JavaScript
-  screenshot <url|-> <output> [--wait <ms>] [--target <id>]  截图
-  snapshot <url|-> [--wait <ms>] [--max-nodes <n>] [--target <id>]  无障碍快照
-  wait-for <url|-> <selector> [--timeout <ms>] [--target <id>]  等待可见元素
-  click <url|-> <selector> [--timeout <ms>] [--target <id>]  点击唯一可见元素
-  fill <url|-> <selector> <value> [--timeout <ms>] [--target <id>]  填写文本控件
-  press <url|-> <selector> <key> [--timeout <ms>] [--target <id>]  发送按键
-  scroll <url|-> <selector> <direction> [amount] [--timeout <ms>] [--target <id>]  滚动元素或页面
+  extract <url|-> [--wait <ms>] [--target <id>] [--foreground]  提取页面文本
+  eval <url|-> <js-code> [--wait <ms>] [--target <id>] [--foreground]  执行 JavaScript
+  screenshot <url|-> <output> [--wait <ms>] [--target <id>] [--foreground]  截图
+  snapshot <url|-> [--wait <ms>] [--max-nodes <n>] [--target <id>] [--foreground]  无障碍快照
+  wait-for <url|-> <selector> [--timeout <ms>] [--target <id>] [--foreground]  等待可见元素
+  click <url|-> <selector> [--timeout <ms>] [--target <id>] [--foreground]  点击唯一可见元素
+  fill <url|-> <selector> <value> [--timeout <ms>] [--target <id>] [--foreground]  填写文本控件
+  press <url|-> <selector> <key> [--timeout <ms>] [--target <id>] [--foreground]  发送按键
+  scroll <url|-> <selector> <direction> [amount] [--timeout <ms>] [--target <id>] [--foreground]  滚动元素或页面
   tabs list                      列出所有标签
   tabs close <pattern>           关闭匹配的自有标签
   tabs close-id <targetId>       关闭明确指定的标签
   tabs close-tracked             关闭之前创建的所有标签
-  tabs open <url> [--background] 打开或复用标签，并清理其他自有标签
-  cleanup [--keep <id,id,...>]   清理自有标签，可保留指定标签
+  tabs open <url...> [--foreground]  后台打开或复用标签（可一次多个），不关闭其他标签
+  cleanup [--keep <id,id,...>]   任务结束后统一关闭自有标签，可保留指定标签
   ping                           测试连接
 
 特性:
-  - 只自动关闭本脚本创建并追踪的标签
+  - 默认在后台新建标签，不抢占焦点；仅 --foreground 显式要求时切到前台
+  - 不关闭用户标签；cleanup 只关闭本脚本创建并追踪的标签
+  - 相同 URL 复用自有标签，避免重复新建/关闭
+  - 页面命令不再隐式关闭任何标签
   - 所有浏览器操作仅作用于指定标签或脚本创建的标签；过期 ID 会拒绝执行
-  - 相同 URL 优先复用自有标签；清理其他自有标签
   - 按浏览器会话隔离追踪文件，并使用文件锁协调并发操作
   - 环境变量 CDP_HOST / CDP_PORT 可配置连接地址
 
@@ -581,57 +651,63 @@ CDP 浏览器自动化执行器
 
     switch (command) {
       case 'extract': {
-        const { positionals, options } = parseOptions(args.slice(1), { '--wait': 'wait', '--target': 'targetId' });
+        const { positionals, options } = parseOptions(args.slice(1), { '--wait': 'wait', '--target': 'targetId' }, { '--foreground': 'foreground' });
         const url = positionals[0] || (options.targetId ? '-' : undefined);
         if (!url) throw new Error('缺少 URL 或 --target 参数');
-        result = await cmdExtract(url, { wait: parsedNumber(options.wait, '--wait', 5000), targetId: options.targetId });
+        result = await cmdExtract(url, {
+          wait: parsedNumber(options.wait, '--wait', 5000), targetId: options.targetId, foreground: options.foreground
+        });
         break;
       }
 
       case 'eval': {
-        const { positionals, options } = parseOptions(args.slice(1), { '--wait': 'wait', '--target': 'targetId' });
+        const { positionals, options } = parseOptions(args.slice(1), { '--wait': 'wait', '--target': 'targetId' }, { '--foreground': 'foreground' });
         const url = positionals[0] || (options.targetId ? '-' : undefined);
         const jsCode = positionals[1];
         if (!url || !jsCode) throw new Error('缺少 URL 或 JS 代码参数');
-        result = await cmdEval(url, jsCode, { wait: parsedNumber(options.wait, '--wait', 3000), targetId: options.targetId });
+        result = await cmdEval(url, jsCode, {
+          wait: parsedNumber(options.wait, '--wait', 3000), targetId: options.targetId, foreground: options.foreground
+        });
         break;
       }
 
       case 'screenshot': {
-        const { positionals, options } = parseOptions(args.slice(1), { '--wait': 'wait', '--target': 'targetId' });
+        const { positionals, options } = parseOptions(args.slice(1), { '--wait': 'wait', '--target': 'targetId' }, { '--foreground': 'foreground' });
         const url = positionals[0] || (options.targetId ? '-' : undefined);
         const output = positionals[1];
         if (!url || !output) throw new Error('缺少 URL 或输出路径参数');
-        result = await cmdScreenshot(url, output, { wait: parsedNumber(options.wait, '--wait', 3000), targetId: options.targetId });
+        result = await cmdScreenshot(url, output, {
+          wait: parsedNumber(options.wait, '--wait', 3000), targetId: options.targetId, foreground: options.foreground
+        });
         break;
       }
 
       case 'snapshot': {
         const { positionals, options } = parseOptions(args.slice(1), {
           '--wait': 'wait', '--target': 'targetId', '--max-nodes': 'maxNodes'
-        });
+        }, { '--foreground': 'foreground' });
         const url = positionals[0] || (options.targetId ? '-' : undefined);
         if (!url) throw new Error('缺少 URL 或 --target 参数');
         const maxNodes = parsedNumber(options.maxNodes, '--max-nodes', 500, { allowZero: false });
         result = await cmdSnapshot(url, {
-          wait: parsedNumber(options.wait, '--wait', 500), maxNodes, targetId: options.targetId
+          wait: parsedNumber(options.wait, '--wait', 500), maxNodes, targetId: options.targetId, foreground: options.foreground
         });
         break;
       }
 
       case 'wait-for': {
-        const { positionals, options } = parseOptions(args.slice(1), { '--timeout': 'timeout', '--target': 'targetId' });
+        const { positionals, options } = parseOptions(args.slice(1), { '--timeout': 'timeout', '--target': 'targetId' }, { '--foreground': 'foreground' });
         const url = positionals[0] || (options.targetId ? '-' : undefined);
         const selector = positionals[1];
         if (!url || !selector) throw new Error('缺少 URL 或 CSS selector 参数');
         result = await cmdWaitFor(url, selector, {
-          timeout: parsedNumber(options.timeout, '--timeout', 10000, { allowZero: false }), targetId: options.targetId
+          timeout: parsedNumber(options.timeout, '--timeout', 10000, { allowZero: false }), targetId: options.targetId, foreground: options.foreground
         });
         break;
       }
 
       case 'click': case 'fill': case 'press': case 'scroll': {
-        const { positionals, options } = parseOptions(args.slice(1), { '--target': 'targetId', '--timeout': 'timeout' });
+        const { positionals, options } = parseOptions(args.slice(1), { '--target': 'targetId', '--timeout': 'timeout' }, { '--foreground': 'foreground' });
         const url = positionals[0] || (options.targetId ? '-' : undefined);
         const selector = positionals[1];
         const values = positionals.slice(2);
@@ -646,6 +722,7 @@ CDP 浏览器自动化执行器
         }
         result = await cmdElementAction(command, url, selector, values, {
           targetId: options.targetId,
+          foreground: options.foreground,
           timeout: parsedNumber(options.timeout, '--timeout', 10000, { allowZero: false })
         });
         break;
