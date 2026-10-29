@@ -2,7 +2,7 @@
 name: cdp-browser
 description: "通过 Chrome DevTools Protocol (CDP) 连接已运行的浏览器，执行页面快照、交互、数据提取和标签管理。当用户要求连接调试端口、读取网页、操作页面、截图或管理标签时使用。默认后台新建标签、任务结束后统一清理，不关闭用户标签；关闭浏览器、重启浏览器、关闭用户标签、点击提交/删除/购买/发送类控件前，必须先取得用户明确授权。"
 metadata:
-  version: "1.10.0"
+  version: "1.11.0"
 ---
 
 # CDP 浏览器自动化
@@ -64,6 +64,36 @@ macOS：
 ```bash
 "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --remote-debugging-port=9222 --user-data-dir=/tmp/cdp-browser-profile
 ```
+
+### Windows 快捷方式配置（保持端口可用）
+
+端口和会话恢复都由**启动参数**决定，而 Windows 上不同入口各有一份快捷方式，参数不一致就会出现"有时能连、有时连不上"。需要同时改这几处：
+
+- 任务栏固定：`%APPDATA%\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar\<浏览器>.lnk`
+- 开始菜单：`%APPDATA%\Microsoft\Windows\Start Menu\Programs\<浏览器>.lnk`
+
+统一使用下面的参数（端口按实际改）：
+
+```text
+--remote-debugging-port=9222 --remote-allow-origins=* --restore-last-session
+```
+
+- `--remote-debugging-port` 打开 CDP 端口；
+- `--remote-allow-origins=*` 放宽 WebSocket 来源校验，仅本机端口时风险低，不需要可去掉；
+- `--restore-last-session` 重启后恢复上次的标签页，避免关浏览器就丢现场。
+
+用 PowerShell 改（改前先备份 `.lnk`）：
+
+```powershell
+$lnk = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Cent Browser.lnk"
+Copy-Item $lnk "$env:TEMP\Cent Browser.lnk.bak" -Force
+$shell = New-Object -ComObject WScript.Shell
+$shortcut = $shell.CreateShortcut($lnk)
+$shortcut.Arguments = '--remote-debugging-port=9222 --remote-allow-origins=* --restore-last-session'
+$shortcut.Save()
+```
+
+改完必须**完全退出浏览器（含托盘图标）**再从快捷方式启动才生效；然后 `ping` 应返回 `portSource=default`，`tabs list` 能看到原有标签。只改快捷方式不会影响正在运行的实例。
 
 **为什么正常启动的浏览器没有端口**（用户问起时这样解释）：
 
