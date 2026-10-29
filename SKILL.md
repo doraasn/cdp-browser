@@ -2,7 +2,7 @@
 name: cdp-browser
 description: "通过 Chrome DevTools Protocol (CDP) 连接已运行的浏览器，执行页面快照、交互、数据提取和标签管理。当用户要求连接调试端口、读取网页、操作页面、截图或管理标签时使用。默认后台新建标签、任务结束后统一清理，不关闭用户标签；关闭浏览器、重启浏览器、关闭用户标签、点击提交/删除/购买/发送类控件前，必须先取得用户明确授权。"
 metadata:
-  version: "1.7.0"
+  version: "1.8.0"
 ---
 
 # CDP 浏览器自动化
@@ -25,60 +25,58 @@ Windows 启动示例：
 
 独立目录是一份新的浏览器配置，原配置中的登录状态和 Cookie 不会自动复制过去。调试端口可以控制浏览器，请限制为本机访问，不要暴露到公网。
 
-## 浏览器选择与端口未开启时（优先级）
+## 连接浏览器
 
-1. **首选用户已经打开的浏览器**：直接复用它的登录态和标签，只做只读或用户授权的操作。
-2. 先 `ping` 默认端口 9222；若环境里已有其它工具占用了别的调试端口（例如 9223），改用 `CDP_PORT=9223` 再 ping，不要盲目扫端口。
-3. **端口没开时不要自己去关浏览器**，先告诉用户怎么开，并给出两种方式：
-   - **保持原浏览器运行**，另开一个独立调试实例（新配置，需要重新登录）；
-   - **关闭后带端口重启**——Chrome/Edge 136+ 用默认配置不会再开调试端口，必须同时指定独立 `--user-data-dir`。
-4. 用户不想动现有浏览器时，用**系统默认浏览器**按同样方式开独立调试实例。
+1. 先 `ping` 默认端口 9222；若环境里已有其它工具占用了别的调试端口（例如 9223），改用 `CDP_PORT=9223` 再 ping，不要盲目扫端口。ping 通就直接用，不动用户的浏览器。
+2. **ping 不通时不要再问用户怎么选，直接启动独立调试实例**：
 
-Windows 开启示例（端口 9222，可按需改）：
+   ```bash
+   node scripts/launch_debug_browser.mjs
+   ```
+
+   脚本会读取系统默认浏览器（按注册表解析，可用 `CDP_BROWSER_PATH` 指定其它浏览器），用独立配置（默认 `%LOCALAPPDATA%\cdp-browser-profile`，可用 `CDP_PROFILE_DIR` 改）和 `--remote-debugging-port` 后台启动，等端口就绪后返回 JSON。端口已被占用或想换端口时用 `CDP_PORT` 指定。
+3. **不要关闭、重启或接管用户正在使用的浏览器，也不要尝试用默认配置开调试端口。** 默认配置在 Chromium 136+ 已被禁止开远程调试，加了参数也不会通。
+4. **独立实例有边界**：它看不到、也控制不了用户原窗口里的标签；登录态和 Cookie 不继承，首次需要在这个调试窗口里重新登录。用户要操作的页面如果只在原窗口里，请其提供 URL，在该调试窗口重新打开（必要时登录）。
+5. 手动启动（脚本不可用时的备选）：
 
 ```powershell
-# Edge：保持原浏览器运行，另开调试实例
-& "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe" --remote-debugging-port=9222 --user-data-dir="$env:TEMP\cdp-edge"
+# Chrome
+& "$env:ProgramFiles\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir="$env:LOCALAPPDATA\cdp-browser-profile" --no-first-run
 
-# Chrome：同上
-& "$env:ProgramFiles\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir="$env:TEMP\chrome-cdp"
+# Edge
+& "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe" --remote-debugging-port=9222 --user-data-dir="$env:LOCALAPPDATA\cdp-browser-profile" --no-first-run
+
+# CentBrowser（本机路径，按实际安装位置替换）
+& "$env:LOCALAPPDATA\CentBrowser\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir="$env:LOCALAPPDATA\cdp-browser-profile" --no-first-run
 ```
 
-macOS 示例：
+macOS：
 
 ```bash
-"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --remote-debugging-port=9222 --user-data-dir=/tmp/chrome-cdp
-```
-
-CentBrowser 示例（本机路径，按实际安装位置替换）：
-
-```powershell
-& "$env:LOCALAPPDATA\CentBrowser\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir="$env:TEMP\cb-cdp" --no-first-run
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --remote-debugging-port=9222 --user-data-dir=/tmp/cdp-browser-profile
 ```
 
 **为什么正常启动的浏览器没有端口**（用户问起时这样解释）：
 
 - 调试端口只在启动参数里带 `--remote-debugging-port` 时才创建，双击打开浏览器不会开。
-- Chromium 136+ 拒绝在默认配置上开远程调试（Chrome、Edge、CentBrowser 150 内核都一样），必须同时给独立 `--user-data-dir`，否则即使加了端口参数也不通。
-- Chromium 是单实例：浏览器已在运行时再用同一个 `--user-data-dir` 启动，只会把参数转发给现有进程，端口不会新开。要么完全退出浏览器（含托盘图标）后重开，要么换一个 `user-data-dir` 并行启动调试实例。
+- Chromium 136+ 拒绝在默认配置上开远程调试（Chrome、Edge、CentBrowser 150 内核都一样），必须同时给独立 `--user-data-dir`。
+- Chromium 是单实例：浏览器已在运行时再用同一个 `--user-data-dir` 启动，只会把参数转发给现有进程，端口不会新开。
 
-开启后先验证：`node scripts/cdp_executor.mjs ping`，或浏览器访问 `http://127.0.0.1:9222/json/version`。**ping 不通就继续让用户处理，不要声称已经连上或已经读到页面**。端口被占用时换一个端口，并用 `CDP_PORT` 指定。CentBrowser 等其它 Chromium 内核浏览器同理，把上面的 exe 路径换成对应程序即可。
+启动后先验证：`node scripts/cdp_executor.mjs ping`，或访问 `http://127.0.0.1:9222/json/version`。**ping 不通就继续排查，不要声称已经连上或已经读到页面。**
 
 ## 首次连接与授权（硬性规则）
 
-1. 先运行 `ping` 检查调试端口（默认 9222，已知其它端口用 `CDP_PORT` 指定）。若连接成功，直接使用该浏览器会话，不关闭、不重启浏览器。
-2. 若连接失败且浏览器已打开，不要自动关闭。先告诉用户如何开启调试端口（见上一节），并询问是否允许关闭/重启、是否要恢复旧标签，同时给出“保持原浏览器运行，另开调试配置”的选项。
-3. 只有用户同意后才能关闭浏览器。调试端口未开时 CDP 无法读取旧标签；只有在用户选择恢复、且能通过已授权的界面读取时才记录 URL，否则请用户提供标签地址。
-4. 即使重开标签，也只能恢复可读取到的 URL；表单内容、滚动位置和登录态不保证恢复，Chrome 136+ 的新配置还需重新登录。
-5. 用户不同意关闭时，保持原浏览器及其标签不动。
-6. URL 可能含敏感查询参数，未经用户同意不得保存。不得从未公开的浏览器会话文件推断标签状态。
-7. 未能通过 CDP 读到的东西，不得声称已经读到或已经恢复。
+1. 先 `ping`；通了就直接用该会话，不关闭、不重启用户的浏览器。
+2. 不通就运行 `node scripts/launch_debug_browser.mjs` 起独立调试实例，不需要再征求“是否关闭浏览器”的选择；**不得关闭用户正在用的浏览器窗口**。
+3. 独立实例读不到用户原窗口的标签，也不继承登录态；不得声称已经恢复或读取了那些标签。需要时请用户提供 URL 或在该窗口重新登录。
+4. URL 可能含敏感查询参数，未经用户同意不得保存。不得从未公开的浏览器会话文件推断标签状态。
+5. 未能通过 CDP 读到的东西，不得声称已经读到或已经恢复。
 
 ## 标签使用规则（核心）
 
 1. **先规划再开标签**。动手前先估算任务需要几个标签：一个标签能跑到结束就只开一个，不要一条命令开一个、用完就关。
 2. **优先复用**。同一 URL 的自有标签会被自动复用；连续任务应复用同一批标签直到结束，避免反复新建/关闭造成抖动和性能损耗。
-3. **用户指定已有标签时，只使用用户的标签，不新建任何标签**。先用 `tabs list` 找到目标标签 ID，之后所有页面命令都带 `--target <id>`；需要原地操作时 URL 位置传 `-`，不要为了操作而导航或另开标签。
+3. **用户指定已有标签时，只使用用户的标签，不新建任何标签**。先用 `tabs list` 找到目标标签 ID，之后所有页面命令都带 `--target <id>`；需要原地操作时 URL 位置传 `-`，不要为了操作而导航或另开标签。注意这只对**已连接实例内**的标签成立；用户原浏览器窗口里的标签在独立调试实例中不可见，需要请其在该窗口重新打开。
 4. **不关闭用户标签**。用户标签不进入追踪，`cleanup`、`tabs close` 都不会碰它；任务结束后也不得关闭。只有用户明确要求关闭某个标签时，才可用 `tabs close-id <id>` 精确关闭。
 5. **新建标签一律后台**。默认 `background=true`，不抢占焦点、不打断用户；只有用户明确要求前台调试时才加 `--foreground`。
 6. **任务结束统一清理**。全部任务完成后执行一次 `cleanup`；要留给用户查看的标签用 `cleanup --keep <id,...>` 保留。不要每条命令后都 `cleanup` 或 `tabs close`。
@@ -89,6 +87,7 @@ CentBrowser 示例（本机路径，按实际安装位置替换）：
 
 ```bash
 node "$SKILLS_ROOT/cdp-browser/scripts/cdp_executor.mjs" <command> [args...]
+node "$SKILLS_ROOT/cdp-browser/scripts/launch_debug_browser.mjs"   # 端口没开时先起独立调试实例
 ```
 
 在技能目录内执行时可简写为 `node scripts/cdp_executor.mjs <command> [args...]`。所有命令输出 JSON；失败时以非零状态退出。标签相关输出字段：`targetId`、`newTab`（本次是否新建）、`reusedTab`（是否复用）。
