@@ -2,7 +2,7 @@
 name: cdp-browser
 description: "通过 Chrome DevTools Protocol (CDP) 连接已运行的浏览器，执行页面快照、交互、数据提取和标签管理。当用户要求连接调试端口、读取网页、操作页面、截图或管理标签时使用。默认后台新建标签、任务结束后统一清理，不关闭用户标签；关闭浏览器、重启浏览器、关闭用户标签、点击提交/删除/购买/发送类控件前，必须先取得用户明确授权。"
 metadata:
-  version: "1.14.0"
+  version: "1.15.0"
 ---
 
 # CDP 浏览器自动化
@@ -149,6 +149,17 @@ node "$SKILLS_ROOT/cdp-browser/scripts/launch_debug_browser.mjs"   # 一个端�
 | `press` / `scroll` | `action`、`selector`、`element`（按键会发送 keydown/keyup，可能触发页面监听和默认行为，例如 Enter 提交表单） |
 | `cleanup` | `cleanedUp`、`failed`、`keptTracked` |
 
+### 复杂 JS 用 `--file`，不要塞进命令行
+
+Windows PowerShell 会吞掉或转义内层引号，稍长的 JS 传进去很容易变成 `SyntaxError: Unexpected end of input`。把 JS 写到文件再执行：
+
+```powershell
+node scripts/cdp_executor.mjs eval - --target TARGET_ID --file .\snippet.js
+Get-Content .\snippet.js -Raw | node scripts/cdp_executor.mjs eval - --target TARGET_ID --stdin
+```
+
+bash 下对应 `cat snippet.js | node scripts/cdp_executor.mjs eval - --target TARGET_ID --stdin`。短表达式（如 `document.title`）仍可直接作为参数传。
+
 常用命令：
 
 ```bash
@@ -157,6 +168,7 @@ node scripts/cdp_executor.mjs tabs list
 node scripts/cdp_executor.mjs tabs open <url...> [--foreground]
 node scripts/cdp_executor.mjs extract <url|-> [--wait <ms>] [--target <id>] [--foreground]
 node scripts/cdp_executor.mjs eval <url|-> <js-code> [--target <id>]
+node scripts/cdp_executor.mjs eval <url|-> --file <js-path> [--target <id>]
 node scripts/cdp_executor.mjs snapshot <url|-> [--target <id>]
 node scripts/cdp_executor.mjs screenshot <url|-> <output-path> [--target <id>]
 node scripts/cdp_executor.mjs click <url|-> <selector> [--target <id>]
@@ -174,7 +186,7 @@ node scripts/cdp_executor.mjs cleanup [--keep <id,id,...>]
 | `tabs list` | 列出页面标签及其 `tracked` 状态；只读取，不关闭 |
 | `tabs open <url...> [--foreground]` | 后台打开或复用标签，可一次传多个 URL；不关闭其他标签 |
 | `extract <url> [--wait ms]` | 提取标题、当前 URL 和最多 200 行页面文本 |
-| `eval <url> <js-code> [--wait ms]` | 执行页面 JavaScript 并返回结果 |
+| `eval <url|-> <js-code> | --file <path> | --stdin [--wait ms]` | 执行页面 JavaScript；复杂 JS 用 `--file` 或 `--stdin`，避免 PowerShell 吞引号 |
 | `screenshot <url> <output> [--wait ms]` | 保存当前视口的 PNG 截图 |
 | `snapshot <url>` | 读取精简的无障碍树，最多 500 个节点 |
 | `wait-for <url> <selector> [--timeout ms]` | 等待 selector 对应的可见元素 |

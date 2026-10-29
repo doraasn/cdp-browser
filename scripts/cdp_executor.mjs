@@ -713,10 +713,26 @@ CDP 浏览器自动化执行器
       }
 
       case 'eval': {
-        const { positionals, options } = parseOptions(args.slice(1), { '--wait': 'wait', '--target': 'targetId' }, { '--foreground': 'foreground', '--navigate-user-tab': 'navigateUserTab' });
+        const { positionals, options } = parseOptions(args.slice(1), {
+          '--wait': 'wait', '--target': 'targetId', '--file': 'scriptFile'
+        }, {
+          '--foreground': 'foreground', '--navigate-user-tab': 'navigateUserTab', '--stdin': 'scriptStdin'
+        });
         const url = positionals[0] || (options.targetId ? '-' : undefined);
-        const jsCode = positionals[1];
-        if (!url || !jsCode) throw new Error('缺少 URL 或 JS 代码参数');
+
+        // 复杂 JS 走文件或 stdin，避免 PowerShell 把引号吞掉导致语法错误。
+        let jsCode = positionals[1];
+        if (options.scriptFile) {
+          try {
+            jsCode = fs.readFileSync(options.scriptFile, 'utf-8');
+          } catch (error) {
+            throw new Error(`读取 JS 文件失败: ${options.scriptFile} (${error.message})`);
+          }
+        } else if (options.scriptStdin) {
+          jsCode = fs.readFileSync(0, 'utf-8');
+        }
+
+        if (!url || !jsCode) throw new Error('缺少 URL 或 JS 代码参数（复杂 JS 建议用 --file <path> 或 --stdin）');
         result = await cmdEval(url, jsCode, {
           wait: parsedNumber(options.wait, '--wait', 3000), targetId: options.targetId, foreground: options.foreground, navigateUserTab: options.navigateUserTab
         });

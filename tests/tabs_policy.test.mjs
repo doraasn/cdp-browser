@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -173,6 +173,24 @@ test('冻结标签快速失败并给出可操作提示', async t => {
   assert.equal(code, 1);
   assert.match(JSON.parse(stderr).error, /无响应|冻结/);
   assert.ok(elapsed < 10000, `应快速失败，实际 ${elapsed}ms`);
+});
+
+test('eval 支持从文件读取 JS，避免 PowerShell 引号问题', async t => {
+  const cdp = await startFakeCdp({ tabs: [{ id: 'user-tab', url: 'https://user.example' }] });
+  t.after(() => cdp.close());
+  const env = await withTempDir(t);
+
+  const jsFile = path.join(env.TEMP, 'snippet.js');
+  await writeFile(jsFile, "document.title + '!'", 'utf8');
+
+  const ok = await runCdp(cdp.port, ['eval', '-', '--target', 'user-tab', '--file', jsFile, '--wait', '0'], env);
+  assert.equal(ok.code, 0);
+  const evaluateCalls = cdp.requests.filter(item => item.method === 'Runtime.evaluate');
+  assert.equal(evaluateCalls.at(-1).params.expression, "document.title + '!'");
+
+  const missing = await runCdp(cdp.port, ['eval', '-', '--target', 'user-tab', '--file', path.join(env.TEMP, 'missing.js')], env);
+  assert.equal(missing.code, 1);
+  assert.match(JSON.parse(missing.stderr).error, /读取 JS 文件失败/);
 });
 
 test('并发命令各自新建标签且互不关闭', async t => {
