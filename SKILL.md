@@ -2,7 +2,7 @@
 name: cdp-browser
 description: "通过 Chrome DevTools Protocol (CDP) 连接已运行的浏览器，执行页面快照、交互、数据提取和标签管理。当用户要求连接调试端口、读取网页、操作页面、截图或管理标签时使用。默认后台新建标签、任务结束后统一清理，不关闭用户标签；关闭浏览器、重启浏览器、关闭用户标签、点击提交/删除/购买/发送类控件前，必须先取得用户明确授权。"
 metadata:
-  version: "1.9.0"
+  version: "1.10.0"
 ---
 
 # CDP 浏览器自动化
@@ -13,7 +13,7 @@ metadata:
 
 - Node.js 提供内置 WebSocket API，无需安装 npm 依赖。
 - 浏览器需开启本地远程调试端口，默认连接 `127.0.0.1:9222`，可用 `CDP_HOST`、`CDP_PORT` 修改。
-- **Chrome 136 及更高版本**要求调试启动参数同时指定独立的 `--user-data-dir`；默认用户数据目录不再开放远程调试端口。
+- **Chrome 136 及更高版本**对"默认配置 + 调试端口"有策略限制，官方要求另给独立的 `--user-data-dir`。但这是 Chrome 自身的策略，Chromium 分支不一定会拦：本机 CentBrowser 5.3（Chromium 150）实测用**原来的默认配置**加 `--remote-debugging-port=9222 --restore-last-session` 重启后，端口正常、原有 11 个标签全部可读。**先尝试重启同一配置，不要预设它一定不行。**
 
 Windows 启动示例：
 
@@ -36,7 +36,15 @@ Windows 启动示例：
    ```
 
    脚本用系统默认浏览器（注册表解析，可用 `CDP_BROWSER_PATH` 覆盖）、独立配置（默认 `%LOCALAPPDATA%\cdp-browser-profile`，可用 `CDP_PROFILE_DIR` 改）和 `--remote-debugging-port` 后台启动，等端口就绪后返回 JSON。想换端口用 `CDP_PORT`。
-4. **不要关闭、重启或接管用户正在使用的浏览器，也不要尝试用默认配置开调试端口。** 默认配置在 Chromium 136+ 已被禁止开远程调试，加了参数也不会通。
+4. **端口没开时，首选让同一个浏览器带端口重启**（能保留登录态和原有标签，从而真正接管用户自己的标签）：
+
+   ```powershell
+   & "$env:LOCALAPPDATA\CentBrowser\Application\chrome.exe" --remote-debugging-port=9222 --remote-allow-origins=* --restore-last-session
+   ```
+
+   这会关闭并重开浏览器，**必须先征得用户同意**，不要擅自执行；标签用 `--restore-last-session` 恢复（Chrome/Edge 用 `--restore-last-session`，其它分支同理）。
+5. 用户不想重启、或重启后端口仍打不开时，才退回到独立配置实例（见第 3 条），并说明登录态不继承。
+6. 不要偷偷接管用户正在用的浏览器；不要在不告知的情况下关闭它。
 5. **独立实例有边界**：它看不到、也控制不了用户原窗口里的标签；登录态和 Cookie 不继承，首次需要在这个调试窗口里重新登录。用户要操作的页面如果只在原窗口里，请其提供 URL，在该调试窗口重新打开（必要时登录）。
 6. 手动启动（脚本不可用时的备选）：
 
@@ -60,8 +68,8 @@ macOS：
 **为什么正常启动的浏览器没有端口**（用户问起时这样解释）：
 
 - 调试端口只在启动参数里带 `--remote-debugging-port` 时才创建，双击打开浏览器不会开。
-- Chromium 136+ 拒绝在默认配置上开远程调试（Chrome、Edge、CentBrowser 150 内核都一样），必须同时给独立 `--user-data-dir`。
-- Chromium 是单实例：浏览器已在运行时再用同一个 `--user-data-dir` 启动，只会把参数转发给现有进程，端口不会新开。
+- Chrome 官方对默认配置有"禁止远程调试"的策略，但是否生效取决于具体构建：本机 CentBrowser 150 实测用原默认配置带端口重启后完全正常。所以先试同一配置重启，失败了再改用独立 `--user-data-dir`。
+- Chromium 是单实例：浏览器已在运行时再用同一个 `--user-data-dir` 启动，只会把参数转发给现有进程，端口不会新开。必须先退出（含托盘）再带参数启动。
 
 连上后先验证：`node scripts/cdp_executor.mjs ping` 和 `tabs list`。**ping 不通就继续排查，不要声称已经连上或已经读到页面。**
 
