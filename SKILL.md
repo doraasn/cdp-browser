@@ -2,7 +2,7 @@
 name: cdp-browser
 description: "通过 Chrome DevTools Protocol (CDP) 连接已运行的浏览器，执行页面快照、交互、数据提取和标签管理。当用户要求连接调试端口、读取网页、操作页面、截图或管理标签时使用。默认后台新建标签、任务结束后统一清理，不关闭用户标签；关闭浏览器、重启浏览器、关闭用户标签、点击提交/删除/购买/发送类控件前，必须先取得用户明确授权。"
 metadata:
-  version: "1.11.0"
+  version: "1.12.0"
 ---
 
 # CDP 浏览器自动化
@@ -27,26 +27,27 @@ Windows 启动示例：
 
 ## 连接浏览器
 
-1. 先跑 `ping`。脚本会自动发现端点，顺序是：`CDP_PORT` 指定的端口 → 9222 → **正在运行且带 `--remote-debugging-port` 的浏览器**（读进程命令行解析，不盲扫端口）。返回里的 `port`、`portSource` 会说明连的是哪个、怎么找到的。
-2. `portSource=running-browser` 说明连上的是**用户自己的浏览器**：可以直接 `tabs list` 看到并操作他的标签（只读优先、用 `--target` 指定、不关闭、不新建）。这是"直接操控用户标签"的唯一可行路径。
-3. 一个都没发现时，不要再问用户怎么选，直接启动独立调试实例：
+1. 先跑 `ping`。脚本会自动发现端点，顺序是：`CDP_PORT` 指定的端口 → 9222 → **正在运行且带 `--remote-debugging-port` 的浏览器**（读进程命令行解析，不盲扫端口）。返回里的 `port`、`portSource` 说明连的是哪个、怎么找到的。
+2. 判断连的是谁：`portSource` 为 `default` 或 `running-browser` 都可能是**用户自己的浏览器**（9222 上就可能是他的日常浏览器），看 `tabs list` 里 `tracked=false` 的标签即可确认。这种情况下可以直接用 `--target` 操作他的标签（只读优先、不关闭、不新建）。
+3. **每个命令都是独立进程**：用了非默认端口时，每条命令都要带上，例如 PowerShell 里先 `$env:CDP_PORT='9390'`，或用 `CDP_PORT=9390 node ...`（bash）。
+4. 一个端口都没发现时，不要再问用户怎么选，直接启动独立调试实例：
 
    ```bash
    node scripts/launch_debug_browser.mjs
    ```
 
-   脚本用系统默认浏览器（注册表解析，可用 `CDP_BROWSER_PATH` 覆盖）、独立配置（默认 `%LOCALAPPDATA%\cdp-browser-profile`，可用 `CDP_PROFILE_DIR` 改）和 `--remote-debugging-port` 后台启动，等端口就绪后返回 JSON。想换端口用 `CDP_PORT`。
-4. **端口没开时，首选让同一个浏览器带端口重启**（能保留登录态和原有标签，从而真正接管用户自己的标签）：
+   脚本用系统默认浏览器（注册表解析，可用 `CDP_BROWSER_PATH` 覆盖）、独立配置（默认 `%LOCALAPPDATA%\cdp-browser-profile`，可用 `CDP_PROFILE_DIR` 改）和 `--remote-debugging-port` 后台启动，等端口就绪后返回 JSON。显式设了 `CDP_PORT` 时只用该端口，不会悄悄换端口。
+5. 想直接接管用户自己的标签：**经用户同意后**让同一个浏览器带端口重启（保留登录态和原有标签）：
 
    ```powershell
    & "$env:LOCALAPPDATA\CentBrowser\Application\chrome.exe" --remote-debugging-port=9222 --remote-allow-origins=* --restore-last-session
    ```
 
-   这会关闭并重开浏览器，**必须先征得用户同意**，不要擅自执行；标签用 `--restore-last-session` 恢复（Chrome/Edge 用 `--restore-last-session`，其它分支同理）。
-5. 用户不想重启、或重启后端口仍打不开时，才退回到独立配置实例（见第 3 条），并说明登录态不继承。
-6. 不要偷偷接管用户正在用的浏览器；不要在不告知的情况下关闭它。
-5. **独立实例有边界**：它看不到、也控制不了用户原窗口里的标签；登录态和 Cookie 不继承，首次需要在这个调试窗口里重新登录。用户要操作的页面如果只在原窗口里，请其提供 URL，在该调试窗口重新打开（必要时登录）。
-6. 手动启动（脚本不可用时的备选）：
+   这会关闭并重开浏览器，**必须先征得同意，不要擅自执行**。
+6. 用户不想重启、或重启后端口仍打不开时，才退回独立配置实例（见第 4 条），并说明登录态不继承、看不到原窗口标签。
+7. 不要偷偷接管用户正在用的浏览器；不要在不告知的情况下关闭它。
+
+手动启动（脚本不可用时的备选）：
 
 ```powershell
 # Chrome
@@ -116,7 +117,7 @@ $shortcut.Save()
 
 1. **先规划再开标签**。动手前先估算任务需要几个标签：一个标签能跑到结束就只开一个，不要一条命令开一个、用完就关。
 2. **优先复用**。同一 URL 的自有标签会被自动复用；连续任务应复用同一批标签直到结束，避免反复新建/关闭造成抖动和性能损耗。
-3. **用户指定已有标签时，只使用用户的标签，不新建任何标签**。先用 `tabs list` 找到目标标签 ID，之后所有页面命令都带 `--target <id>`；需要原地操作时 URL 位置传 `-`，不要为了操作而导航或另开标签。注意这只对**已连接实例内**的标签成立；用户原浏览器窗口里的标签在独立调试实例中不可见，需要请其在该窗口重新打开。
+3. **用户指定已有标签时，只使用用户的标签，不新建任何标签**。先用 `tabs list` 找到目标标签 ID，之后所有页面命令都带 `--target <id>`；需要原地操作时 URL 位置传 `-`。**带 URL 导航用户标签会被拒绝**（避免覆盖他当前的页面），确实要导航必须显式加 `--navigate-user-tab`。注意这只对**已连接实例内**的标签成立；独立调试实例看不到用户原窗口的标签，需要请其在该窗口重新打开。
 4. **不关闭用户标签**。用户标签不进入追踪，`cleanup`、`tabs close` 都不会碰它；任务结束后也不得关闭。只有用户明确要求关闭某个标签时，才可用 `tabs close-id <id>` 精确关闭。
 5. **新建标签一律后台**。默认 `background=true`，不抢占焦点、不打断用户；只有用户明确要求前台调试时才加 `--foreground`。
 6. **任务结束统一清理**。全部任务完成后执行一次 `cleanup`；要留给用户查看的标签用 `cleanup --keep <id,...>` 保留。不要每条命令后都 `cleanup` 或 `tabs close`。
@@ -127,7 +128,7 @@ $shortcut.Save()
 
 ```bash
 node "$SKILLS_ROOT/cdp-browser/scripts/cdp_executor.mjs" <command> [args...]
-node "$SKILLS_ROOT/cdp-browser/scripts/launch_debug_browser.mjs"   # 端口没开时先起独立调试实例
+node "$SKILLS_ROOT/cdp-browser/scripts/launch_debug_browser.mjs"   # 一个端口都没发现时，起独立调试实例
 ```
 
 在技能目录内执行时可简写为 `node scripts/cdp_executor.mjs <command> [args...]`。所有命令输出 JSON；失败时以非零状态退出。标签相关输出字段：`targetId`、`newTab`（本次是否新建）、`reusedTab`（是否复用）。
@@ -170,7 +171,7 @@ node scripts/cdp_executor.mjs cleanup [--keep <id,id,...>]
 | `tabs close-tracked` / `cleanup` | 任务结束后关闭本脚本创建并追踪的所有标签 |
 | `cleanup --keep <id,id,...>` | 关闭其他自有标签并保留指定标签 |
 
-页面命令可附加 `--target <id>` 精确选择现有标签，附加 `--foreground` 才会把标签切到前台。若不需要导航，在 URL 位置传 `-`，例如 `click - "button.search" --target TARGET_ID`。不传 `--target` 时，页面命令只复用 URL 相同的自有标签，没有才新建，且不关闭其他标签。
+页面命令可附加 `--target <id>` 精确选择现有标签，附加 `--foreground` 才会把标签切到前台，附加 `--navigate-user-tab` 才会允许用 URL 导航用户标签。若不需要导航，在 URL 位置传 `-`，例如 `click - "button.search" --target TARGET_ID`。不传 `--target` 时，页面命令只复用 URL 相同的自有标签，没有才新建，且不关闭其他标签。
 
 ## 标签归属与清理
 

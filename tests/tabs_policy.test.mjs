@@ -131,6 +131,24 @@ test('用户标签只读不建：--target 后不新建，cleanup 也不关闭它
   assert.equal(tabs.find(tab => tab.id === 'user-tab').tracked, false);
 });
 
+test('拒绝用 URL 参数导航用户标签，需显式放行', async t => {
+  const cdp = await startFakeCdp({ tabs: [{ id: 'user-tab', url: 'https://user.example' }] });
+  t.after(() => cdp.close());
+  const env = await withTempDir(t);
+
+  const blocked = await runCdp(cdp.port, ['extract', 'https://other.example', '--target', 'user-tab'], env);
+  assert.equal(blocked.code, 1);
+  assert.match(JSON.parse(blocked.stderr).error, /拒绝导航用户标签/);
+  assert.equal(cdp.requests.some(item => item.method === 'Page.navigate'), false);
+
+  const allowed = await runCdp(cdp.port, [
+    'extract', 'https://other.example', '--target', 'user-tab', '--navigate-user-tab', '--wait', '0'
+  ], env);
+  assert.equal(allowed.code, 0);
+  assert.equal(cdp.requests.some(item => item.method === 'Page.navigate'), true);
+  assert.equal(cdp.createCalls().length, 0);
+});
+
 test('并发命令各自新建标签且互不关闭', async t => {
   const cdp = await startFakeCdp();
   t.after(() => cdp.close());

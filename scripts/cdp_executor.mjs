@@ -283,8 +283,12 @@ async function prepareTarget(url, options = {}) {
       const selected = targets.find(target => target.type === 'page' && target.id === requestedTargetId);
       if (!selected) throw new Error('指定的标签 ID 已失效，请重新运行 tabs list 获取当前 ID');
 
-      // 用户指定的标签：只导航、不纳入追踪，任务结束后也不会被清理。
+      const isTracked = trackedIds.includes(selected.id);
       const shouldNavigate = url && url !== '-' && selected.url !== url;
+      // 用户自己的标签只允许原地操作；带 URL 导航会覆盖他当前的页面，需显式放行。
+      if (shouldNavigate && !isTracked && !options.allowUserNavigation) {
+        throw new Error('拒绝导航用户标签：URL 位置传 - 表示原地操作；确实要导航请加 --navigate-user-tab');
+      }
       if (shouldNavigate) {
         const sessionId = await attachToTarget(selected.id);
         try {
@@ -297,7 +301,7 @@ async function prepareTarget(url, options = {}) {
         targetId: selected.id,
         reused: true,
         created: false,
-        tracked: trackedIds.includes(selected.id),
+        tracked: isTracked,
         navigated: Boolean(shouldNavigate)
       };
     }
@@ -330,7 +334,11 @@ async function focusTarget(targetId) {
 // 统一入口：默认后台执行；只有显式 --foreground 才把标签切到前台。
 async function ensureTarget(url, options = {}) {
   const background = options.background ?? !options.foreground;
-  const target = await prepareTarget(url, { ...options, background });
+  const target = await prepareTarget(url, {
+    ...options,
+    background,
+    allowUserNavigation: options.navigateUserTab === true
+  });
   if (options.foreground) await focusTarget(target.targetId);
   return target;
 }
@@ -674,33 +682,33 @@ CDP 浏览器自动化执行器
 
     switch (command) {
       case 'extract': {
-        const { positionals, options } = parseOptions(args.slice(1), { '--wait': 'wait', '--target': 'targetId' }, { '--foreground': 'foreground' });
+        const { positionals, options } = parseOptions(args.slice(1), { '--wait': 'wait', '--target': 'targetId' }, { '--foreground': 'foreground', '--navigate-user-tab': 'navigateUserTab' });
         const url = positionals[0] || (options.targetId ? '-' : undefined);
         if (!url) throw new Error('缺少 URL 或 --target 参数');
         result = await cmdExtract(url, {
-          wait: parsedNumber(options.wait, '--wait', 5000), targetId: options.targetId, foreground: options.foreground
+          wait: parsedNumber(options.wait, '--wait', 5000), targetId: options.targetId, foreground: options.foreground, navigateUserTab: options.navigateUserTab
         });
         break;
       }
 
       case 'eval': {
-        const { positionals, options } = parseOptions(args.slice(1), { '--wait': 'wait', '--target': 'targetId' }, { '--foreground': 'foreground' });
+        const { positionals, options } = parseOptions(args.slice(1), { '--wait': 'wait', '--target': 'targetId' }, { '--foreground': 'foreground', '--navigate-user-tab': 'navigateUserTab' });
         const url = positionals[0] || (options.targetId ? '-' : undefined);
         const jsCode = positionals[1];
         if (!url || !jsCode) throw new Error('缺少 URL 或 JS 代码参数');
         result = await cmdEval(url, jsCode, {
-          wait: parsedNumber(options.wait, '--wait', 3000), targetId: options.targetId, foreground: options.foreground
+          wait: parsedNumber(options.wait, '--wait', 3000), targetId: options.targetId, foreground: options.foreground, navigateUserTab: options.navigateUserTab
         });
         break;
       }
 
       case 'screenshot': {
-        const { positionals, options } = parseOptions(args.slice(1), { '--wait': 'wait', '--target': 'targetId' }, { '--foreground': 'foreground' });
+        const { positionals, options } = parseOptions(args.slice(1), { '--wait': 'wait', '--target': 'targetId' }, { '--foreground': 'foreground', '--navigate-user-tab': 'navigateUserTab' });
         const url = positionals[0] || (options.targetId ? '-' : undefined);
         const output = positionals[1];
         if (!url || !output) throw new Error('缺少 URL 或输出路径参数');
         result = await cmdScreenshot(url, output, {
-          wait: parsedNumber(options.wait, '--wait', 3000), targetId: options.targetId, foreground: options.foreground
+          wait: parsedNumber(options.wait, '--wait', 3000), targetId: options.targetId, foreground: options.foreground, navigateUserTab: options.navigateUserTab
         });
         break;
       }
@@ -708,29 +716,29 @@ CDP 浏览器自动化执行器
       case 'snapshot': {
         const { positionals, options } = parseOptions(args.slice(1), {
           '--wait': 'wait', '--target': 'targetId', '--max-nodes': 'maxNodes'
-        }, { '--foreground': 'foreground' });
+        }, { '--foreground': 'foreground', '--navigate-user-tab': 'navigateUserTab' });
         const url = positionals[0] || (options.targetId ? '-' : undefined);
         if (!url) throw new Error('缺少 URL 或 --target 参数');
         const maxNodes = parsedNumber(options.maxNodes, '--max-nodes', 500, { allowZero: false });
         result = await cmdSnapshot(url, {
-          wait: parsedNumber(options.wait, '--wait', 500), maxNodes, targetId: options.targetId, foreground: options.foreground
+          wait: parsedNumber(options.wait, '--wait', 500), maxNodes, targetId: options.targetId, foreground: options.foreground, navigateUserTab: options.navigateUserTab
         });
         break;
       }
 
       case 'wait-for': {
-        const { positionals, options } = parseOptions(args.slice(1), { '--timeout': 'timeout', '--target': 'targetId' }, { '--foreground': 'foreground' });
+        const { positionals, options } = parseOptions(args.slice(1), { '--timeout': 'timeout', '--target': 'targetId' }, { '--foreground': 'foreground', '--navigate-user-tab': 'navigateUserTab' });
         const url = positionals[0] || (options.targetId ? '-' : undefined);
         const selector = positionals[1];
         if (!url || !selector) throw new Error('缺少 URL 或 CSS selector 参数');
         result = await cmdWaitFor(url, selector, {
-          timeout: parsedNumber(options.timeout, '--timeout', 10000, { allowZero: false }), targetId: options.targetId, foreground: options.foreground
+          timeout: parsedNumber(options.timeout, '--timeout', 10000, { allowZero: false }), targetId: options.targetId, foreground: options.foreground, navigateUserTab: options.navigateUserTab
         });
         break;
       }
 
       case 'click': case 'fill': case 'press': case 'scroll': {
-        const { positionals, options } = parseOptions(args.slice(1), { '--target': 'targetId', '--timeout': 'timeout' }, { '--foreground': 'foreground' });
+        const { positionals, options } = parseOptions(args.slice(1), { '--target': 'targetId', '--timeout': 'timeout' }, { '--foreground': 'foreground', '--navigate-user-tab': 'navigateUserTab' });
         const url = positionals[0] || (options.targetId ? '-' : undefined);
         const selector = positionals[1];
         const values = positionals.slice(2);
@@ -745,7 +753,7 @@ CDP 浏览器自动化执行器
         }
         result = await cmdElementAction(command, url, selector, values, {
           targetId: options.targetId,
-          foreground: options.foreground,
+          foreground: options.foreground, navigateUserTab: options.navigateUserTab,
           timeout: parsedNumber(options.timeout, '--timeout', 10000, { allowZero: false })
         });
         break;

@@ -100,8 +100,22 @@ async function waitForVersion(deadline) {
 }
 
 async function main() {
-  // 已有带调试端口的浏览器（含用户自己的窗口）优先复用，不另起实例。
-  const endpoint = await detectEndpoint({ host: HOST, preferredPort: PREFERRED_PORT });
+  // 显式指定 CDP_PORT 时只用该端口：通了就复用，没通就按该端口启动，不悄悄换端口。
+  // 未指定时才自动发现，已有带调试端口的浏览器（含用户自己的窗口）优先复用。
+  let endpoint;
+  if (PREFERRED_PORT) {
+    const version = await getVersionOnPort();
+    endpoint = version ? {
+      host: HOST,
+      port: PREFERRED_PORT,
+      source: 'CDP_PORT',
+      browser: version.Browser,
+      wsUrl: version.webSocketDebuggerUrl
+    } : null;
+  } else {
+    endpoint = await detectEndpoint({ host: HOST });
+  }
+
   if (endpoint) {
     print({
       launched: false,
