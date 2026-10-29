@@ -160,6 +160,8 @@ Get-Content .\snippet.js -Raw | node scripts/cdp_executor.mjs eval - --target TA
 
 bash 下对应 `cat snippet.js | node scripts/cdp_executor.mjs eval - --target TARGET_ID --stdin`。短表达式（如 `document.title`）仍可直接作为参数传。
 
+**不要用 `| Select-Object -First N` 截断这些命令的输出**：管道提前关闭会让 node 收到 EPIPE 并以退出码 1 结束，看起来像“命令失败但 JSON 是 success”。需要截断就先 `2>&1 | Out-String` 收全，再处理字符串。
+
 常用命令：
 
 ```bash
