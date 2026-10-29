@@ -15,11 +15,22 @@ import os from 'os';
 import crypto from 'crypto';
 import { getPageSnapshot } from './page_snapshot.mjs';
 import { createDomActions } from './dom_actions.mjs';
+import { detectEndpoint } from './cdp_endpoint.mjs';
 
 // 配置
 const CDP_HOST = process.env.CDP_HOST || '127.0.0.1';
-const CDP_PORT = process.env.CDP_PORT || '9222';
-const CDP_URL = `http://${CDP_HOST}:${CDP_PORT}`;
+let CDP_PORT = process.env.CDP_PORT ? Number(process.env.CDP_PORT) : null;
+let CDP_URL = CDP_PORT ? `http://${CDP_HOST}:${CDP_PORT}` : null;
+
+// 未显式指定端口时，按 9222 → 运行中浏览器的调试端口 顺序发现端点。
+async function resolveEndpoint() {
+  if (CDP_PORT) return { port: CDP_PORT, source: 'CDP_PORT' };
+  const found = await detectEndpoint({ host: CDP_HOST });
+  if (!found) return null;
+  CDP_PORT = found.port;
+  CDP_URL = `http://${CDP_HOST}:${CDP_PORT}`;
+  return found;
+}
 
 // 按浏览器实例隔离标签追踪，避免不同配置或重启后的旧 ID 互相影响。
 let trackerFile = null;
@@ -64,6 +75,8 @@ function getHttp(url) {
 }
 
 async function connect() {
+  const endpoint = await resolveEndpoint();
+  if (!endpoint) throw new Error('未找到可用的调试端口：已检查 CDP_PORT、9222 和运行中浏览器的 --remote-debugging-port');
   const version = await getHttp(`${CDP_URL}/json/version`);
   const wsUrl = version.webSocketDebuggerUrl;
   const browserWsUrl = new URL(wsUrl);
@@ -572,16 +585,26 @@ async function cmdTabs(action, args = []) {
 }
 
 async function cmdPing() {
+  const endpoint = await resolveEndpoint();
+  if (!endpoint) {
+    return {
+      connected: false,
+      error: '未找到可用的调试端口：已检查 CDP_PORT、9222 和运行中浏览器的 --remote-debugging-port'
+    };
+  }
   try {
     const version = await getHttp(`${CDP_URL}/json/version`);
     return {
       connected: true,
+      port: CDP_PORT,
+      portSource: endpoint.source || 'CDP_PORT',
       browser: version.Browser,
       wsUrl: version.webSocketDebuggerUrl
     };
   } catch (e) {
     return {
       connected: false,
+      port: CDP_PORT,
       error: e.message
     };
   }

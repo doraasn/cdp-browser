@@ -1,19 +1,20 @@
 #!/usr/bin/env node
 
 /**
- * 启动独立调试实例
- * 默认配置不再开放远程调试端口，因此统一用独立 profile 启动一个可调试的浏览器，
- * 不动用户正在使用的浏览器窗口与配置。端口已可用时直接复用，不再拉起新实例。
+ * 连接或启动浏览器
+ * 1. 已有带调试端口的浏览器（用户自己的窗口）优先复用，不另起实例；
+ * 2. 都没有时才用独立 profile 启动一个可调试的浏览器，不动用户正在使用的窗口与配置。
  */
 
-import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { spawn, execFileSync } from 'node:child_process';
+import { detectEndpoint, getVersion } from './cdp_endpoint.mjs';
 
 const HOST = process.env.CDP_HOST || '127.0.0.1';
-const PORT = Number(process.env.CDP_PORT || 9222);
+const PREFERRED_PORT = process.env.CDP_PORT ? Number(process.env.CDP_PORT) : null;
+const PORT = PREFERRED_PORT || 9222;
 const PROFILE_DIR = process.env.CDP_PROFILE_DIR
   || path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), '.cache'), 'cdp-browser-profile');
 const START_TIMEOUT_MS = 25000;
@@ -42,19 +43,8 @@ function fail(message, extra = {}) {
   process.exit(1);
 }
 
-function getVersion() {
-  return new Promise(resolve => {
-    const request = http.get({ host: HOST, port: PORT, path: '/json/version', timeout: 1500 }, response => {
-      let body = '';
-      response.setEncoding('utf8');
-      response.on('data', chunk => { body += chunk; });
-      response.on('end', () => {
-        try { resolve(JSON.parse(body)); } catch { resolve(null); }
-      });
-    });
-    request.on('timeout', () => { request.destroy(); resolve(null); });
-    request.on('error', () => resolve(null));
-  });
+function getVersionOnPort() {
+  return getVersion(PORT, HOST, 1500);
 }
 
 function readRegistry(key, valueName) {
@@ -102,7 +92,7 @@ function detectBrowser() {
 
 async function waitForVersion(deadline) {
   while (Date.now() < deadline) {
-    const version = await getVersion();
+    const version = await getVersionOnPort();
     if (version) return version;
     await new Promise(resolve => setTimeout(resolve, 300));
   }
@@ -110,22 +100,24 @@ async function waitForVersion(deadline) {
 }
 
 async function main() {
-  const existing = await getVersion();
-  if (existing) {
+  // 已有带调试端口的浏览器（含用户自己的窗口）优先复用，不另起实例。
+  const endpoint = await detectEndpoint({ host: HOST, preferredPort: PREFERRED_PORT });
+  if (endpoint) {
     print({
       launched: false,
       reused: true,
-      host: HOST,
-      port: PORT,
-      browser: existing.Browser,
-      wsUrl: existing.webSocketDebuggerUrl
+      host: endpoint.host,
+      port: endpoint.port,
+      portSource: endpoint.source,
+      browser: endpoint.browser,
+      wsUrl: endpoint.wsUrl
     });
     return;
   }
 
   const browser = detectBrowser();
   if (!browser) {
-    fail('未找到 Chrome / Edge / CentBrowser，可用 CDP_BROWSER_PATH 指定浏览器可执行文件路径', {
+    fail('未找到可用的调试端口，也没找到 Chrome / Edge / CentBrowser；可用 CDP_BROWSER_PATH 指定浏览器可执行文件路径', {
       host: HOST,
       port: PORT
     });
@@ -172,11 +164,12 @@ async function main() {
     reused: false,
     host: HOST,
     port: PORT,
+    portSource: 'launched',
     browser: version.Browser,
     executable: browser,
     profile: PROFILE_DIR,
     wsUrl: version.webSocketDebuggerUrl,
-    note: '这是独立配置，原浏览器窗口的标签不可见、登录态不继承，首次需要在该窗口内重新登录'
+    note: '已有带调试端口的浏览器都没找到，才起这个独立实例；它的标签与用户原窗口隔离，登录态不继承'
   });
 }
 
