@@ -5,7 +5,7 @@ import { createHash, randomUUID } from 'node:crypto';
  * 测试用假 CDP 服务：模拟 /json、/json/version、/json/close 和 WebSocket 命令。
  * 返回 requests（客户端发来的 CDP 消息）、closes（被关闭的标签 ID）和 pages（当前标签）。
  */
-export async function startFakeCdp({ tabs = [], instance = randomUUID() } = {}) {
+export async function startFakeCdp({ tabs = [], instance = randomUUID(), hangMethods = [] } = {}) {
   const requests = [];
   const closes = [];
   const closeMethods = [];
@@ -88,6 +88,7 @@ export async function startFakeCdp({ tabs = [], instance = randomUUID() } = {}) 
 
   function handle(message, socket) {
     const { id, method, params = {} } = message;
+    if (hangMethods.includes(method)) return; // 模拟被冻结的标签：不返回任何响应
     let result = {};
 
     if (method === 'Target.createTarget') {

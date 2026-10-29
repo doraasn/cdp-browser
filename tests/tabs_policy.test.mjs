@@ -149,6 +149,32 @@ test('拒绝用 URL 参数导航用户标签，需显式放行', async t => {
   assert.equal(cdp.createCalls().length, 0);
 });
 
+test('ping 探测失败时退出码非零', async t => {
+  const env = await withTempDir(t);
+  const closedPort = 65500;
+  const { code, stdout } = await runCdp(closedPort, ['ping'], env);
+  assert.equal(code, 1);
+  const payload = JSON.parse(stdout);
+  assert.equal(payload.data.connected, false);
+});
+
+test('冻结标签快速失败并给出可操作提示', async t => {
+  const cdp = await startFakeCdp({
+    tabs: [{ id: 'frozen-tab', url: 'https://frozen.example' }],
+    hangMethods: ['Runtime.evaluate']
+  });
+  t.after(() => cdp.close());
+  const env = await withTempDir(t);
+
+  const started = Date.now();
+  const { code, stderr } = await runCdp(cdp.port, ['extract', '-', '--target', 'frozen-tab', '--wait', '0'], env);
+  const elapsed = Date.now() - started;
+
+  assert.equal(code, 1);
+  assert.match(JSON.parse(stderr).error, /无响应|冻结/);
+  assert.ok(elapsed < 10000, `应快速失败，实际 ${elapsed}ms`);
+});
+
 test('并发命令各自新建标签且互不关闭', async t => {
   const cdp = await startFakeCdp();
   t.after(() => cdp.close());

@@ -41,13 +41,13 @@ let ws = null;
 let msgId = 0;
 const pending = new Map();
 
-function cdpSend(method, params = {}, sessionId) {
+function cdpSend(method, params = {}, sessionId, timeoutMs = 30000) {
   return new Promise((resolve, reject) => {
     const id = ++msgId;
     const timeout = setTimeout(() => {
       pending.delete(id);
       reject(new Error(`CDP 命令超时: ${method}`));
-    }, 30000);
+    }, timeoutMs);
 
     pending.set(id, { resolve, reject, timeout });
     const msg = { id, method, params };
@@ -159,16 +159,28 @@ async function detachFromTarget(sessionId) {
   await cdpSend('Target.detachFromTarget', { sessionId });
 }
 
-async function evaluate(expression, sessionId) {
+async function evaluate(expression, sessionId, timeoutMs = 30000) {
   const result = await cdpSend('Runtime.evaluate', {
     expression,
     returnByValue: true,
     awaitPromise: true
-  }, sessionId);
+  }, sessionId, timeoutMs);
   if (result.exceptionDetails) {
     throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text || '页面脚本执行失败');
   }
   return result.result?.value;
+}
+
+// 附加后用短超时探活：标签被冻结/后台挂起时，快速给出可操作的错误，而不是干等 30 秒。
+async function ensureResponsive(sessionId, targetId) {
+  try {
+    await evaluate('1', sessionId, 2500);
+  } catch (error) {
+    if (/超时/.test(error.message)) {
+      throw new Error(`标签 ${String(targetId).slice(0, 8)} 无响应：可能已冻结或在后台挂起；先激活该标签，或改用 tabs open 新建标签`);
+    }
+    throw error;
+  }
 }
 
 async function captureScreenshot(sessionId, format = 'png') {
@@ -324,6 +336,7 @@ async function prepareTarget(url, options = {}) {
 
 async function focusTarget(targetId) {
   const sessionId = await attachToTarget(targetId);
+  await ensureResponsive(sessionId, targetId);
   try {
     await cdpSend('Page.bringToFront', {}, sessionId);
   } finally {
@@ -382,6 +395,7 @@ async function cmdExtract(url, options = {}) {
   await new Promise(r => setTimeout(r, wait));
 
   const sessionId = await attachToTarget(targetId);
+  await ensureResponsive(sessionId, targetId);
 
   // 提取页面文本
   const script = `
@@ -420,6 +434,7 @@ async function cmdEval(url, jsCode, options = {}) {
   await new Promise(r => setTimeout(r, wait));
 
   const sessionId = await attachToTarget(targetId);
+  await ensureResponsive(sessionId, targetId);
   const result = await evaluate(jsCode, sessionId);
   await detachFromTarget(sessionId);
 
@@ -435,6 +450,7 @@ async function cmdScreenshot(url, outputPath, options = {}) {
   await new Promise(r => setTimeout(r, wait));
 
   const sessionId = await attachToTarget(targetId);
+  await ensureResponsive(sessionId, targetId);
   const data = await captureScreenshot(sessionId);
   await detachFromTarget(sessionId);
 
@@ -453,6 +469,7 @@ async function cmdSnapshot(url, options = {}) {
   const target = await ensureTarget(url, options);
   if (wait > 0) await new Promise(resolve => setTimeout(resolve, wait));
   const sessionId = await attachToTarget(target.targetId);
+  await ensureResponsive(sessionId, target.targetId);
   try {
     const snapshot = await getPageSnapshot(cdpSend, sessionId, { maxNodes });
     return { ...snapshot, targetId: target.targetId, reusedTab: target.reused, newTab: target.created };
@@ -465,6 +482,7 @@ async function cmdWaitFor(url, selector, options = {}) {
   const { timeout = 10000 } = options;
   const target = await ensureTarget(url, options);
   const sessionId = await attachToTarget(target.targetId);
+  await ensureResponsive(sessionId, target.targetId);
   try {
     const element = await waitForSelector(sessionId, selector, timeout);
     return { targetId: target.targetId, selector, element, reusedTab: target.reused, newTab: target.created };
@@ -476,6 +494,7 @@ async function cmdWaitFor(url, selector, options = {}) {
 async function cmdElementAction(action, url, selector, values = [], options = {}) {
   const target = await ensureTarget(url, options);
   const sessionId = await attachToTarget(target.targetId);
+  await ensureResponsive(sessionId, target.targetId);
   try {
     await waitForSelector(sessionId, selector, options.timeout ?? 10000);
     const actions = createDomActions({ send: cdpSend, sessionId });
@@ -789,6 +808,9 @@ CDP 浏览器自动化执行器
       data: result,
       timestamp: new Date().toISOString()
     }, null, 2));
+
+    // ping 探测失败也返回 JSON，但退出码必须非零，避免调用方误判为已连接。
+    if (command === 'ping' && result && result.connected === false) process.exitCode = 1;
 
   } catch (error) {
     console.error(JSON.stringify({

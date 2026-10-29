@@ -183,7 +183,9 @@ async function main() {
     executable: browser,
     profile: PROFILE_DIR,
     wsUrl: version.webSocketDebuggerUrl,
-    note: '已有带调试端口的浏览器都没找到，才起这个独立实例；它的标签与用户原窗口隔离，登录态不继承'
+    note: PREFERRED_PORT
+      ? `已按 CDP_PORT=${PREFERRED_PORT} 启动独立实例（显式端口时不会探测其它端口）；它的标签与用户原窗口隔离，登录态不继承`
+      : '有调试端口的浏览器都没发现，才起这个独立实例；它的标签与用户原窗口隔离，登录态不继承'
   });
 }
 
