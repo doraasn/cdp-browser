@@ -171,7 +171,7 @@ node scripts/cdp_executor.mjs cleanup [--keep <id,id,...>]
 | `tabs close-tracked` / `cleanup` | 任务结束后关闭本脚本创建并追踪的所有标签 |
 | `cleanup --keep <id,id,...>` | 关闭其他自有标签并保留指定标签 |
 
-页面命令可附加 `--target <id>` 精确选择现有标签，附加 `--foreground` 才会把标签切到前台，附加 `--navigate-user-tab` 才会允许用 URL 导航用户标签。若不需要导航，在 URL 位置传 `-`，例如 `click - "button.search" --target TARGET_ID`。不传 `--target` 时，页面命令只复用 URL 相同的自有标签，没有才新建，且不关闭其他标签。
+页面命令可附加 `--target <id>` 精确选择现有标签，附加 `--foreground` 才会把标签切到前台，附加 `--navigate-user-tab` 才会允许用 URL 导航用户标签。若不需要导航，在 URL 位置传 `-`，例如 `click - "button.search" --target TARGET_ID`。不传 `--target` 时，页面命令只复用 URL 相同的自有标签，没有才新建，且不关闭其他标签。`tabs open` 传一个 URL 时返回扁平对象（含 `targetId`），传多个时返回 `{ tabs: [...] }`。
 
 ## 标签归属与清理
 

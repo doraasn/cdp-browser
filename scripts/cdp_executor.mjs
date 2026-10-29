@@ -656,6 +656,8 @@ CDP 浏览器自动化执行器
   cleanup [--keep <id,id,...>]   任务结束后统一关闭自有标签，可保留指定标签
   ping                           测试连接
 
+页面命令可加 --foreground 切到前台，加 --navigate-user-tab 才允许用 URL 导航用户标签。
+
 特性:
   - 默认在后台新建标签，不抢占焦点；仅 --foreground 显式要求时切到前台
   - 不关闭用户标签；cleanup 只关闭本脚本创建并追踪的标签
