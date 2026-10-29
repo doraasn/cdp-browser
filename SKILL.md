@@ -2,7 +2,7 @@
 name: cdp-browser
 description: "通过 Chrome DevTools Protocol (CDP) 连接已运行的浏览器，执行页面快照、交互、数据提取和标签管理。当用户要求连接调试端口、读取网页、操作页面、截图或管理标签时使用。默认后台新建标签、任务结束后统一清理，不关闭用户标签；关闭浏览器、重启浏览器、关闭用户标签、点击提交/删除/购买/发送类控件前，必须先取得用户明确授权。"
 metadata:
-  version: "1.13.0"
+  version: "1.14.0"
 ---
 
 # CDP 浏览器自动化
@@ -27,8 +27,8 @@ Windows 启动示例：
 
 ## 连接浏览器
 
-1. 先跑 `ping`。脚本会自动发现端点，顺序是：`CDP_PORT` 指定的端口 → 9222 → **正在运行且带 `--remote-debugging-port` 的浏览器**（读进程命令行解析，不盲扫端口）。返回里的 `port`、`portSource` 说明连的是哪个、怎么找到的。
-2. 判断连的是谁：`portSource` 为 `default` 或 `running-browser` 都可能是**用户自己的浏览器**（9222 上就可能是他的日常浏览器），看 `tabs list` 里 `tracked=false` 的标签即可确认。这种情况下可以直接用 `--target` 操作他的标签（只读优先、不关闭、不新建）。
+1. 先跑 `ping`。脚本会自动发现端点，顺序是：`CDP_PORT` 指定的端口 → 9222 → **正在运行且带 `--remote-debugging-port` 的有界面浏览器**（读进程命令行解析，不盲扫端口）。**默认跳过 headless 实例**，避免误连别的项目跑着的自动化浏览器；需要时用 `CDP_INCLUDE_HEADLESS=1` 打开，或用 `CDP_IGNORE_PORTS=9223,9333` 排除指定端口。返回里的 `port`、`portSource` 说明连的是哪个、怎么找到的。
+2. 本机同时跑着别的项目浏览器时，**建议每条命令都显式带 `CDP_PORT`**，不要依赖自动发现来回退。判断连的是谁：`portSource` 为 `default` 或 `running-browser` 都可能是**用户自己的浏览器**（9222 上就可能是他的日常浏览器），看 `tabs list` 里 `tracked=false` 的标签即可确认。这种情况下可以直接用 `--target` 操作他的标签（只读优先、不关闭、不新建）。
 3. **每个命令都是独立进程**：用了非默认端口时，每条命令都要带上，例如 PowerShell 里先 `$env:CDP_PORT='9390'`，或用 `CDP_PORT=9390 node ...`（bash）。
 4. 一个端口都没发现时，不要再问用户怎么选，直接启动独立调试实例：
 
@@ -132,7 +132,22 @@ node "$SKILLS_ROOT/cdp-browser/scripts/cdp_executor.mjs" <command> [args...]
 node "$SKILLS_ROOT/cdp-browser/scripts/launch_debug_browser.mjs"   # 一个端口都没发现时，起独立调试实例
 ```
 
-在技能目录内执行时可简写为 `node scripts/cdp_executor.mjs <command> [args...]`。成功结果输出到 **stdout**，失败信息输出到 **stderr**，都是 JSON；失败时退出码非零（`ping` 连不上也返回 1，同时 stdout 里有 `connected=false`）。标签相关输出字段：`targetId`、`newTab`（本次是否新建）、`reusedTab`（是否复用）。
+在技能目录内执行时可简写为 `node scripts/cdp_executor.mjs <command> [args...]`。成功结果输出到 **stdout**，失败信息输出到 **stderr**，都是 JSON；失败时退出码非零（`ping` 连不上也返回 1，同时 stdout 里有 `connected=false`）。
+
+常见返回字段：
+
+| 命令 | 返回 |
+|---|---|
+| `tabs list` | 数组，每项 `id`、`title`、`url`、`tracked`；覆盖所有窗口，不区分窗口归属 |
+| `tabs open` | 单个 URL 返回扁平对象（`targetId`、`url`、`newTab`、`reusedTab`、`background`）；多个 URL 返回 `{ tabs: [...] }` |
+| `extract` | `title`、`url`、`lines`、`totalLines`、`targetId`、`newTab`、`reusedTab` |
+| `eval` | `result`（页面表达式返回值） |
+| `screenshot` | `path`、`size`、`newTab`、`reusedTab` |
+| `snapshot` | `nodes`、`snapshot`、`nodeCount`、`maxNodes`、`truncated` |
+| `click` | `action`、`selector`、`element`、`x`、`y` |
+| `fill` | `action`、`selector`、`element`、`changed`、`valueLength`（**不回显输入内容**，要核对就再 `eval` 读一次） |
+| `press` / `scroll` | `action`、`selector`、`element`（按键会发送 keydown/keyup，可能触发页面监听和默认行为，例如 Enter 提交表单） |
+| `cleanup` | `cleanedUp`、`failed`、`keptTracked` |
 
 常用命令：
 
@@ -177,8 +192,8 @@ node scripts/cdp_executor.mjs cleanup [--keep <id,id,...>]
 ## 标签归属与清理
 
 - 只有脚本自己创建并追踪的标签会被清理；用户已有标签只允许读取列表，或通过 `--target` 使用。
-- **用户标签可能被浏览器冻结或后台挂起**（长时间没激活的标签常见）：命令会先做 2.5 秒探活，失败时返回“标签无响应：可能已冻结或在后台挂起”，此时先激活该标签，或改用 `tabs open` 新建标签，不要反复重试。
-- `tabs open` 支持 `file://` 本地页面，自测时不需要外网。
+- **用户标签可能被浏览器冻结或后台挂起**（长时间没激活的标签常见）：命令会先做 2.5 秒探活，失败时返回“标签无响应：可能已冻结或在后台挂起”，此时先激活它——给任意只读命令加 `--foreground` 即可，例如 `extract - --target <id> --foreground --wait 0`——或改用 `tabs open` 新建标签，不要反复重试。
+- `tabs open` 支持 `file://` 本地页面，自测时不需要外网。路径含中文或空格时整体加引号，例如 `"file:///C:/Users/Lenovo/测试 页.html"`；能避免时优先用 ASCII 文件名。
 - 脚本创建标签时记录在系统临时目录下、以浏览器调试会话标识区分的追踪文件内，写入使用文件锁和原子替换；不得把旧版共享追踪文件里的标签 ID 当作本会话自有标签。
 - 每次操作前刷新标签列表；过期 ID 会报错并停止，不会猜测替代标签。URL 位置传 `-` 表示不导航当前标签。
 - 页面命令本身不关闭任何标签；清理只发生在显式调用 `cleanup` / `tabs close*` 时。
