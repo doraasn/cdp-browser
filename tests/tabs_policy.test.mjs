@@ -79,13 +79,19 @@ test('tabs open 可一次后台打开多个标签', async t => {
   assert.deepEqual(cdp.closes, []);
 });
 
-test('--foreground 才切到前台并聚焦', async t => {
+test('tabs open 拒绝 --foreground，只在显式 user-requested 时才切前台', async t => {
   const cdp = await startFakeCdp();
   t.after(() => cdp.close());
   const env = await withTempDir(t);
 
-  const { code } = await runCdp(cdp.port, ['tabs', 'open', 'https://a.example', '--foreground'], env);
-  assert.equal(code, 0);
+  const blocked = await runCdp(cdp.port, ['tabs', 'open', 'https://a.example', '--foreground'], env);
+  assert.equal(blocked.code, 1);
+  assert.match(JSON.parse(blocked.stderr).error, /拒绝 --foreground/);
+  assert.equal(cdp.createCalls().length, 0);
+  assert.equal(cdp.requests.some(item => item.method === 'Page.bringToFront'), false);
+
+  const allowed = await runCdp(cdp.port, ['tabs', 'open', 'https://a.example', '--user-requested-foreground'], env);
+  assert.equal(allowed.code, 0);
   assert.equal(cdp.createCalls()[0].params.background, false);
   assert.equal(cdp.requests.some(item => item.method === 'Page.bringToFront'), true);
 });

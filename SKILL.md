@@ -2,7 +2,7 @@
 name: cdp-browser
 description: "通过 Chrome DevTools Protocol (CDP) 连接已运行的浏览器，执行页面快照、交互、数据提取和标签管理。当用户要求连接调试端口、读取网页、操作页面、截图或管理标签时使用。默认后台新建标签、任务结束后统一清理，不关闭用户标签；关闭浏览器、重启浏览器、关闭用户标签、点击提交/删除/购买/发送类控件前，必须先取得用户明确授权。"
 metadata:
-  version: "1.16.0"
+  version: "1.17.0"
 ---
 
 # CDP 浏览器自动化
@@ -124,7 +124,7 @@ $shortcut.Save()
 
 **三条硬红线**
 
-- `tabs open` 不负责“激活”，只负责“打开”。给 `tabs open` 加 `--foreground` 就等于抢用户焦点，除用户明确要求前台演示外一律不加。
+- `tabs open` 不负责“激活”，只负责“打开”。给它加 `--foreground` 会被直接拒绝（退出码 1）；只有用户明确要求前台演示时改用 `--user-requested-foreground`。
 - `--foreground` 只有一个合法用途：把**已冻结**的标签激活**一次**。激活后仍报无响应，就 `tabs open` 新标签重建，不要在同一标签上反复重试。
 - 收尾只关自己开的：优先 `tabs close-id <id>`。`cleanup` 会关闭追踪文件里的全部标签，而 `tabs list` 里 `tracked=true` 的标签可能来自早先会话（例如用户自己的购物页、工单页），跑之前必须核对清单。
 
@@ -134,7 +134,7 @@ $shortcut.Save()
 2. **优先复用**。同一 URL 的自有标签会被自动复用；连续任务应复用同一批标签直到结束，避免反复新建/关闭造成抖动和性能损耗。
 3. **用户指定已有标签时，只使用用户的标签，不新建任何标签**。先用 `tabs list` 找到目标标签 ID，之后所有页面命令都带 `--target <id>`；需要原地操作时 URL 位置传 `-`。**只对 `tracked=false` 的用户标签做保护**：带 URL 导航它会被拒绝（避免覆盖他当前的页面），确实要导航必须显式加 `--navigate-user-tab`；自有标签带 URL 则正常导航。注意这只对**已连接实例内**的标签成立；独立调试实例看不到用户原窗口的标签，需要请其在该窗口重新打开。
 4. **不关闭用户标签**。用户标签不进入追踪，`cleanup`、`tabs close` 都不会碰它；任务结束后也不得关闭。只有用户明确要求关闭某个标签时，才可用 `tabs close-id <id>` 精确关闭。
-5. **新建标签一律后台**。默认 `background=true`，不抢占焦点、不打断用户；只有用户明确要求前台调试时才例外。**`--foreground` 不属于“打开”动作**，它是冻结标签的激活手段，使用时必须能说出“刚才报了标签无响应”。
+5. **新建标签一律后台**。默认 `background=true`，不抢占焦点、不打断用户；`tabs open` 收到 `--foreground` 会直接报错退出，避免误用。**`--foreground` 属于页面命令**，是冻结标签的激活手段，使用时必须能说出“刚才报了标签无响应”；用户明确要求前台演示时，`tabs open` 用 `--user-requested-foreground`。
 6. **任务结束统一清理**。收尾用 `tabs close-id` 精确关掉本次任务自己开的标签；要留给用户查看的标签保留并在最后说明。`cleanup` 只在确认追踪清单里全是本次任务标签时才用，否则会把历史会话的标签一起关掉。不要每条命令后都 `cleanup` 或 `tabs close`。
 7. **能并行就并行**。需要多个页面时，用一次 `tabs open <url1> <url2> ...` 批量后台打开，或并发执行多次命令；各自用 `--target` 指向自己的标签。追踪文件带文件锁，并发安全。
 8. **外部变更需授权**。点击提交、删除、购买、发送等会造成外部变更的控件前，必须取得用户明确授权；填写内容本身不代表允许提交。
@@ -181,7 +181,7 @@ bash 下对应 `cat snippet.js | node scripts/cdp_executor.mjs eval - --target T
 ```bash
 node scripts/cdp_executor.mjs ping
 node scripts/cdp_executor.mjs tabs list
-node scripts/cdp_executor.mjs tabs open <url...>            # 默认后台，不加 --foreground
+node scripts/cdp_executor.mjs tabs open <url...>            # 默认后台；--foreground 会被拒绝
 node scripts/cdp_executor.mjs extract <url|-> [--wait <ms>] [--target <id>] [--foreground]
 node scripts/cdp_executor.mjs eval <url|-> <js-code> [--target <id>]
 node scripts/cdp_executor.mjs eval <url|-> --file <js-path> [--target <id>]
@@ -200,7 +200,7 @@ node scripts/cdp_executor.mjs cleanup [--keep <id,id,...>]
 |---|---|
 | `ping` | 检查 CDP 连接 |
 | `tabs list` | 列出页面标签及其 `tracked` 状态；只读取，不关闭 |
-| `tabs open <url...> [--foreground]` | 后台打开或复用标签，可一次传多个 URL；不关闭其他标签。`--foreground` 仅用于用户明确要求的前台演示 |
+| `tabs open <url...> [--user-requested-foreground]` | 后台打开或复用标签，可一次传多个 URL；不关闭其他标签。`--foreground` 会被拒绝，仅用户明确要求前台演示时用 `--user-requested-foreground` |
 | `extract <url> [--wait ms]` | 提取标题、当前 URL 和最多 200 行页面文本 |
 | `eval <url|-> <js-code> | --file <path> | --stdin [--wait ms]` | 执行页面 JavaScript；复杂 JS 用 `--file` 或 `--stdin`，避免 PowerShell 吞引号 |
 | `screenshot <url> <output> [--wait ms]` | 保存当前视口的 PNG 截图 |
