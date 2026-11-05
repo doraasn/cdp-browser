@@ -195,6 +195,18 @@ node scripts/cdp_executor.mjs scroll <url|-> <selector> <direction> [amount] [--
 node scripts/cdp_executor.mjs cleanup [--keep <id,id,...>]
 ```
 
+## 脚本结构
+
+| 文件 | 职责 | 对应命令 |
+|---|---|---|
+| `cdp_executor.mjs` | 唯一命令入口，执行所有操作 | 全部命令 |
+| `launch_debug_browser.mjs` | 找不到端口时启动独立调试实例 | 连接前 |
+| `cdp_endpoint.mjs` | 发现并排序可用调试端口 | ping / 连接阶段 |
+| `dom_actions.mjs` | 点击、填表、按键、滚动 | click / fill / press / scroll |
+| `page_snapshot.mjs` | 生成精简无障碍树快照 | snapshot |
+
+除 `cdp_executor.mjs` 外均为内部模块，由入口 import，不要单独调用，也不要当死代码删除。
+
 ## 命令参考
 
 | 命令 | 作用 |
