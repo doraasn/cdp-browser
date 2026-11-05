@@ -119,13 +119,14 @@ $shortcut.Save()
 **开工清单（每个任务过一遍；跨轮次、隔很久再继续的任务要重新过）**
 
 - 这次要开几个标签？能一个标签跑到结束就只开一个。
-- 全部**后台**打开（`tabs open` 不带 `--foreground`），记下 `targetId`，后续每条命令都带 `--target`。
+- 全部**后台**打开，记下 `targetId`，后续每条命令都带 `--target`。
 - 结束怎么收：哪些用 `tabs close-id` 关、哪些要留给用户。
 
 **三条硬红线**
 
-- `tabs open` 不负责“激活”，只负责“打开”。给它加 `--foreground` 会被直接拒绝（退出码 1）；只有用户明确要求前台演示时改用 `--user-requested-foreground`。
-- `--foreground` 只有一个合法用途：把**已冻结**的标签激活**一次**。激活后仍报无响应，就 `tabs open` 新标签重建，不要在同一标签上反复重试。
+- **不提供任何前台/激活能力**：`--foreground`、`--user-requested-foreground` 一律报错退出；标签只在后台打开和操作，绝不抢用户焦点。
+- **不要绕过技能抢焦点**：禁止用 `/json/new`、`/json/activate`、`Page.bringToFront` 等原生接口开或激活标签；新建一律用 `tabs open`（后台）。用户说“别打扰我”时，连新窗口都不要弹。
+- **不要为了截图/调试去改应用、插件或前端的启动参数**：不要往 Electron / 桌面程序 / 前端代码里塞 `--remote-debugging-port` 之类的参数，也不要把桌面应用窗口当网页标签来操控；要验证 UI 就用浏览器打开网页或本地预览页，并后台打开。
 - 收尾只关自己开的：优先 `tabs close-id <id>`。`cleanup` 会关闭追踪文件里的全部标签，而 `tabs list` 里 `tracked=true` 的标签可能来自早先会话（例如用户自己的购物页、工单页），跑之前必须核对清单。
 
 **细则**
@@ -134,7 +135,7 @@ $shortcut.Save()
 2. **优先复用**。同一 URL 的自有标签会被自动复用；连续任务应复用同一批标签直到结束，避免反复新建/关闭造成抖动和性能损耗。
 3. **用户指定已有标签时，只使用用户的标签，不新建任何标签**。先用 `tabs list` 找到目标标签 ID，之后所有页面命令都带 `--target <id>`；需要原地操作时 URL 位置传 `-`。**只对 `tracked=false` 的用户标签做保护**：带 URL 导航它会被拒绝（避免覆盖他当前的页面），确实要导航必须显式加 `--navigate-user-tab`；自有标签带 URL 则正常导航。注意这只对**已连接实例内**的标签成立；独立调试实例看不到用户原窗口的标签，需要请其在该窗口重新打开。
 4. **不关闭用户标签**。用户标签不进入追踪，`cleanup`、`tabs close` 都不会碰它；任务结束后也不得关闭。只有用户明确要求关闭某个标签时，才可用 `tabs close-id <id>` 精确关闭。
-5. **新建标签一律后台**。默认 `background=true`，不抢占焦点、不打断用户；`tabs open` 收到 `--foreground` 会直接报错退出，避免误用。**`--foreground` 属于页面命令**，是冻结标签的激活手段，使用时必须能说出“刚才报了标签无响应”；用户明确要求前台演示时，`tabs open` 用 `--user-requested-foreground`。
+5. **新建标签一律后台，没有前台参数**。`tabs open` 固定 `background=true`，收到 `--foreground` / `--user-requested-foreground` 直接报错退出。用户标签被冻结时不要试图激活它，改用 `tabs open` 新标签，或请用户自己点开那个标签。
 6. **任务结束统一清理**。收尾用 `tabs close-id` 精确关掉本次任务自己开的标签；要留给用户查看的标签保留并在最后说明。`cleanup` 只在确认追踪清单里全是本次任务标签时才用，否则会把历史会话的标签一起关掉。不要每条命令后都 `cleanup` 或 `tabs close`。
 7. **能并行就并行**。需要多个页面时，用一次 `tabs open <url1> <url2> ...` 批量后台打开，或并发执行多次命令；各自用 `--target` 指向自己的标签。追踪文件带文件锁，并发安全。
 8. **外部变更需授权**。点击提交、删除、购买、发送等会造成外部变更的控件前，必须取得用户明确授权；填写内容本身不代表允许提交。
@@ -181,8 +182,8 @@ bash 下对应 `cat snippet.js | node scripts/cdp_executor.mjs eval - --target T
 ```bash
 node scripts/cdp_executor.mjs ping
 node scripts/cdp_executor.mjs tabs list
-node scripts/cdp_executor.mjs tabs open <url...>            # 默认后台；--foreground 会被拒绝
-node scripts/cdp_executor.mjs extract <url|-> [--wait <ms>] [--target <id>] [--foreground]
+node scripts/cdp_executor.mjs tabs open <url...>            # 固定后台；前台参数会被拒绝
+node scripts/cdp_executor.mjs extract <url|-> [--wait <ms>] [--target <id>]
 node scripts/cdp_executor.mjs eval <url|-> <js-code> [--target <id>]
 node scripts/cdp_executor.mjs eval <url|-> --file <js-path> [--target <id>]
 node scripts/cdp_executor.mjs snapshot <url|-> [--target <id>]
@@ -200,7 +201,7 @@ node scripts/cdp_executor.mjs cleanup [--keep <id,id,...>]
 |---|---|
 | `ping` | 检查 CDP 连接 |
 | `tabs list` | 列出页面标签及其 `tracked` 状态；只读取，不关闭 |
-| `tabs open <url...> [--user-requested-foreground]` | 后台打开或复用标签，可一次传多个 URL；不关闭其他标签。`--foreground` 会被拒绝，仅用户明确要求前台演示时用 `--user-requested-foreground` |
+| `tabs open <url...>` | 固定后台打开或复用标签，可一次传多个 URL；不关闭其他标签。任何前台/激活参数都会报错退出 |
 | `extract <url> [--wait ms]` | 提取标题、当前 URL 和最多 200 行页面文本 |
 | `eval <url|-> <js-code> | --file <path> | --stdin [--wait ms]` | 执行页面 JavaScript；复杂 JS 用 `--file` 或 `--stdin`，避免 PowerShell 吞引号 |
 | `screenshot <url> <output> [--wait ms]` | 保存当前视口的 PNG 截图 |
@@ -215,12 +216,12 @@ node scripts/cdp_executor.mjs cleanup [--keep <id,id,...>]
 | `tabs close-tracked` / `cleanup` | 任务结束后关闭本脚本创建并追踪的所有标签 |
 | `cleanup --keep <id,id,...>` | 关闭其他自有标签并保留指定标签 |
 
-页面命令可附加 `--target <id>` 精确选择现有标签，附加 `--foreground` 才会把标签切到前台，附加 `--navigate-user-tab` 才会允许用 URL 导航用户标签。若不需要导航，在 URL 位置传 `-`，例如 `click - "button.search" --target TARGET_ID`。不传 `--target` 时，页面命令只复用 URL 相同的自有标签，没有才新建，且不关闭其他标签。`tabs open` 传一个 URL 时返回扁平对象（含 `targetId`），传多个时返回 `{ tabs: [...] }`。
+页面命令可附加 `--target <id>` 精确选择现有标签；不提供前台参数（传 `--foreground` 会报错），附加 `--navigate-user-tab` 才会允许用 URL 导航用户标签。若不需要导航，在 URL 位置传 `-`，例如 `click - "button.search" --target TARGET_ID`。不传 `--target` 时，页面命令只复用 URL 相同的自有标签，没有才新建，且不关闭其他标签。`tabs open` 传一个 URL 时返回扁平对象（含 `targetId`），传多个时返回 `{ tabs: [...] }`。
 
 ## 标签归属与清理
 
 - 只有脚本自己创建并追踪的标签会被清理；用户已有标签只允许读取列表，或通过 `--target` 使用。`tabs list` 是实时快照，数量变化也可能来自用户自己开关标签；脚本只在显式 `tabs close*` / `cleanup` 时关闭标签。
-- **用户标签可能被浏览器冻结或后台挂起**（长时间没激活的标签常见）：命令会先做 2.5 秒探活，失败时返回“标签无响应：可能已冻结或在后台挂起”，此时给该标签加一次 `--foreground` 激活（例如 `extract - --target <id> --foreground --wait 0`）；仍然失败就 `tabs open` 新标签重建，不要在同一个标签上反复重试。
+- **用户标签可能被浏览器冻结或后台挂起**（长时间没激活的标签常见）：命令会先做 2.5 秒探活，失败时返回“标签无响应：可能已冻结或在后台挂起”，**不要试图激活它**（技能没有前台能力）；直接 `tabs open` 新标签重建，或请用户自己点开那个标签，不要在同一个标签上反复重试。
 - **`tracked=true` 不等于“本次任务创建的”**：追踪文件会跨会话留存，`tabs list` 里可能挂着用户很早以前由脚本打开的标签。`cleanup`、`tabs close-tracked` 会把它们全部关闭，因此收尾优先用 `tabs close-id` 逐个关自己开的标签；确实要 `cleanup` 时先读一遍清单确认。
 - `tabs open` 支持 `file://` 本地页面，自测时不需要外网。路径含中文或空格时整体加引号，例如 `"file:///C:/Users/Lenovo/测试 页.html"`；能避免时优先用 ASCII 文件名。
 - 脚本创建标签时记录在系统临时目录下、以浏览器调试会话标识区分的追踪文件内，写入使用文件锁和原子替换；不得把旧版共享追踪文件里的标签 ID 当作本会话自有标签。

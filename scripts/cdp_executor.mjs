@@ -334,25 +334,16 @@ async function prepareTarget(url, options = {}) {
   });
 }
 
-async function focusTarget(targetId) {
-  const sessionId = await attachToTarget(targetId);
-  await ensureResponsive(sessionId, targetId);
-  try {
-    await cdpSend('Page.bringToFront', {}, sessionId);
-  } finally {
-    await detachFromTarget(sessionId);
-  }
-}
-
-// 统一入口：默认后台执行；只有显式 --foreground 才把标签切到前台。
+// 统一入口：所有操作一律在后台进行，不提供任何前台/激活能力。
 async function ensureTarget(url, options = {}) {
-  const background = options.background ?? !options.foreground;
+  if (options.foreground || options.userRequestedForeground) {
+    throw new Error('已移除前台调用能力：所有标签都在后台打开与操作，不会切到前台或抢焦点');
+  }
   const target = await prepareTarget(url, {
     ...options,
-    background,
+    background: true,
     allowUserNavigation: options.navigateUserTab === true
   });
-  if (options.foreground) await focusTarget(target.targetId);
   return target;
 }
 
@@ -553,25 +544,25 @@ async function cmdTabs(action, args = []) {
   }
 
   if (action === 'open') {
-    // tabs open 只负责“打开”，不负责“激活”：加 --foreground 会抢用户焦点，直接拒绝。
-    // 冻结标签请对页面命令用 --foreground 激活一次；用户明确要求前台演示时才用 --user-requested-foreground。
-    if (args.includes('--foreground') || args.includes('-f')) {
-      throw new Error('tabs open 拒绝 --foreground：新建标签一律后台，不抢占用户焦点。激活已冻结的标签请对页面命令加 --foreground；用户明确要求前台演示时改用 --user-requested-foreground');
+    // 一律后台打开：拒绝任何前台/激活参数，避免抢用户焦点。
+    for (const flag of ['--foreground', '-f', '--user-requested-foreground']) {
+      if (args.includes(flag)) {
+        throw new Error('已移除前台调用能力：tabs open 只在后台打开标签，不会激活或抢焦点');
+      }
     }
-    const foreground = args.includes('--user-requested-foreground');
     const urls = args.filter(arg => !arg.startsWith('-'));
     const list = urls.length ? urls : ['about:blank'];
     const opened = [];
 
     // 可一次开多个后台标签，供并行任务使用。
     for (const url of list) {
-      const target = await ensureTarget(url, { foreground });
+      const target = await ensureTarget(url);
       opened.push({ targetId: target.targetId, url, reusedTab: target.reused, newTab: target.created });
     }
 
     return opened.length === 1
-      ? { ...opened[0], background: !foreground }
-      : { tabs: opened, background: !foreground };
+      ? { ...opened[0], background: true }
+      : { tabs: opened, background: true };
   }
 
   return withTrackerLock(async () => {
@@ -663,28 +654,27 @@ CDP 浏览器自动化执行器
   node cdp_executor.mjs <command> [args...]
 
 命令:
-  extract <url|-> [--wait <ms>] [--target <id>] [--foreground]  提取页面文本
-  eval <url|-> <js-code> [--wait <ms>] [--target <id>] [--foreground]  执行 JavaScript
-  screenshot <url|-> <output> [--wait <ms>] [--target <id>] [--foreground]  截图
-  snapshot <url|-> [--wait <ms>] [--max-nodes <n>] [--target <id>] [--foreground]  无障碍快照
-  wait-for <url|-> <selector> [--timeout <ms>] [--target <id>] [--foreground]  等待可见元素
-  click <url|-> <selector> [--timeout <ms>] [--target <id>] [--foreground]  点击唯一可见元素
-  fill <url|-> <selector> <value> [--timeout <ms>] [--target <id>] [--foreground]  填写文本控件
-  press <url|-> <selector> <key> [--timeout <ms>] [--target <id>] [--foreground]  发送按键
-  scroll <url|-> <selector> <direction> [amount] [--timeout <ms>] [--target <id>] [--foreground]  滚动元素或页面
+  extract <url|-> [--wait <ms>] [--target <id>]  提取页面文本
+  eval <url|-> <js-code> [--wait <ms>] [--target <id>]  执行 JavaScript
+  screenshot <url|-> <output> [--wait <ms>] [--target <id>]  截图
+  snapshot <url|-> [--wait <ms>] [--max-nodes <n>] [--target <id>]  无障碍快照
+  wait-for <url|-> <selector> [--timeout <ms>] [--target <id>]  等待可见元素
+  click <url|-> <selector> [--timeout <ms>] [--target <id>]  点击唯一可见元素
+  fill <url|-> <selector> <value> [--timeout <ms>] [--target <id>]  填写文本控件
+  press <url|-> <selector> <key> [--timeout <ms>] [--target <id>]  发送按键
+  scroll <url|-> <selector> <direction> [amount] [--timeout <ms>] [--target <id>]  滚动元素或页面
   tabs list                      列出所有标签
   tabs close <pattern>           关闭匹配的自有标签
   tabs close-id <targetId>       关闭明确指定的标签
   tabs close-tracked             关闭之前创建的所有标签
   tabs open <url...>             后台打开或复用标签（可一次多个），不关闭其他标签
-  tabs open <url...> --user-requested-foreground  仅用户明确要求前台演示时使用
   cleanup [--keep <id,id,...>]   任务结束后统一关闭自有标签，可保留指定标签
   ping                           测试连接
 
-页面命令可加 --foreground 切到前台（用于激活已冻结的标签），加 --navigate-user-tab 才允许用 URL 导航用户标签。
+页面命令可加 --navigate-user-tab 才允许用 URL 导航用户标签；不提供任何前台/激活参数。
 
 特性:
-  - 默认在后台新建标签，不抢占焦点；tabs open 拒绝 --foreground，只有页面命令能激活标签
+  - 所有标签都在后台打开与操作，不提供前台/激活能力，不抢占用户焦点
   - 不关闭用户标签；cleanup 只关闭本脚本创建并追踪的标签
   - 相同 URL 复用自有标签，避免重复新建/关闭
   - 页面命令不再隐式关闭任何标签
