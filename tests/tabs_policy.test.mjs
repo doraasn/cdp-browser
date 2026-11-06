@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, readFile, readdir } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -204,6 +204,78 @@ test('eval 支持从文件读取 JS，避免 PowerShell 引号问题', async t =
   const missing = await runCdp(cdp.port, ['eval', '-', '--target', 'user-tab', '--file', path.join(env.TEMP, 'missing.js')], env);
   assert.equal(missing.code, 1);
   assert.match(JSON.parse(missing.stderr).error, /读取 JS 文件失败/);
+});
+
+async function readTracker(env) {
+  const files = (await readdir(env.TEMP)).filter(name => name.startsWith('cdp-created-tabs-'));
+  assert.equal(files.length, 1, '应只有一个追踪文件');
+  return JSON.parse(await readFile(path.join(env.TEMP, files[0]), 'utf8'));
+}
+
+test('cleanup 默认只关本会话标签，别的会话不受影响', async t => {
+  const cdp = await startFakeCdp();
+  t.after(() => cdp.close());
+  const env = await withTempDir(t);
+
+  const opened = await runCdp(cdp.port, ['tabs', 'open', 'https://a.example'], { ...env, CDP_OWNER: 'session-A' });
+  assert.equal(opened.code, 0);
+  const id = parseSuccess(opened.stdout).targetId;
+
+  const other = await runCdp(cdp.port, ['cleanup'], { ...env, CDP_OWNER: 'session-B' });
+  assert.equal(other.code, 0);
+  assert.equal(parseSuccess(other.stdout).cleanedUp, 0);
+  assert.deepEqual(cdp.closes, []);
+  assert.equal(cdp.pages.has(id), true);
+
+  const mine = await runCdp(cdp.port, ['cleanup'], { ...env, CDP_OWNER: 'session-A' });
+  assert.equal(parseSuccess(mine.stdout).cleanedUp, 1);
+  assert.deepEqual(cdp.closes, [id]);
+});
+
+test('旧版字符串追踪文件不会被他人的 cleanup 关掉，--all 才会', async t => {
+  const cdp = await startFakeCdp();
+  t.after(() => cdp.close());
+  const env = await withTempDir(t);
+
+  const opened = await runCdp(cdp.port, ['tabs', 'open', 'https://legacy.example'], { ...env, CDP_OWNER: 'session-A' });
+  const id = parseSuccess(opened.stdout).targetId;
+  const trackerPath = path.join(env.TEMP, (await readdir(env.TEMP)).find(name => name.startsWith('cdp-created-tabs-')));
+  await writeFile(trackerPath, JSON.stringify([id]), 'utf8');
+
+  const other = await runCdp(cdp.port, ['cleanup'], { ...env, CDP_OWNER: 'session-B' });
+  assert.equal(parseSuccess(other.stdout).cleanedUp, 0);
+  assert.equal(cdp.pages.has(id), true);
+
+  const forced = await runCdp(cdp.port, ['cleanup', '--all'], { ...env, CDP_OWNER: 'session-B' });
+  assert.equal(parseSuccess(forced.stdout).cleanedUp, 1);
+  assert.deepEqual(cdp.closes, [id]);
+});
+
+test('同一 URL 跨会话不复用，tabs list 标出 owner/mine', async t => {
+  const cdp = await startFakeCdp();
+  t.after(() => cdp.close());
+  const env = await withTempDir(t);
+
+  const first = await runCdp(cdp.port, ['tabs', 'open', 'https://same.example'], { ...env, CDP_OWNER: 'session-A' });
+  const firstId = parseSuccess(first.stdout).targetId;
+
+  const second = await runCdp(cdp.port, ['tabs', 'open', 'https://same.example'], { ...env, CDP_OWNER: 'session-B' });
+  const secondData = parseSuccess(second.stdout);
+  assert.equal(secondData.newTab, true);
+  assert.notEqual(secondData.targetId, firstId);
+
+  const listed = await runCdp(cdp.port, ['tabs', 'list'], { ...env, CDP_OWNER: 'session-B' });
+  const tabs = parseSuccess(listed.stdout);
+  const mineTab = tabs.find(tab => tab.id === secondData.targetId);
+  const otherTab = tabs.find(tab => tab.id === firstId);
+  assert.equal(mineTab.mine, true);
+  assert.equal(mineTab.owner, 'session-B');
+  assert.equal(otherTab.mine, false);
+  assert.equal(otherTab.owner, 'session-A');
+
+  const cleanupB = await runCdp(cdp.port, ['cleanup'], { ...env, CDP_OWNER: 'session-B' });
+  assert.equal(parseSuccess(cleanupB.stdout).cleanedUp, 1);
+  assert.equal(cdp.pages.has(firstId), true);
 });
 
 test('并发命令各自新建标签且互不关闭', async t => {

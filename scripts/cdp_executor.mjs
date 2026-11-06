@@ -190,11 +190,26 @@ async function captureScreenshot(sessionId, format = 'png') {
 
 // ========== 标签追踪 ==========
 
+// 标签归属：优先 CDP_OWNER，其次 DSH 会话 ID，最后 default。
+const OWNER = String(process.env.CDP_OWNER || process.env.DSH_SESSION_ID || 'default').slice(0, 80);
+
+function normalizeTrackedEntry(item) {
+  if (typeof item === 'string') return { id: item, owner: 'legacy', createdAt: null };
+  if (item && typeof item.id === 'string') {
+    return {
+      id: item.id,
+      owner: typeof item.owner === 'string' && item.owner ? item.owner : 'legacy',
+      createdAt: Number.isFinite(item.createdAt) ? item.createdAt : null
+    };
+  }
+  return null;
+}
+
 function loadTrackedTabs() {
   try {
     if (fs.existsSync(trackerFile)) {
       const data = JSON.parse(fs.readFileSync(trackerFile, 'utf-8'));
-      return Array.isArray(data) ? data.filter(id => typeof id === 'string') : [];
+      return Array.isArray(data) ? data.map(normalizeTrackedEntry).filter(Boolean) : [];
     }
   } catch {}
   return [];
@@ -256,31 +271,36 @@ async function withTrackerLock(operation) {
 
 function addTrackedTab(targetId) {
   const tabs = loadTrackedTabs();
-  if (!tabs.includes(targetId)) {
-    tabs.push(targetId);
+  if (!tabs.some(tab => tab.id === targetId)) {
+    tabs.push({ id: targetId, owner: OWNER, createdAt: Date.now() });
     saveTrackedTabs(tabs);
   }
 }
 
-async function closeTrackedTabs(keepIds = []) {
+// 默认只关闭当前 owner 的标签；all=true 才会动别的会话/历史遗留的标签。
+async function closeTrackedTabs(keepIds = [], { all = false } = {}) {
   const trackedTabs = loadTrackedTabs();
   const keep = new Set(keepIds);
   const remaining = [];
   const failed = [];
   let closedCount = 0;
 
-  for (const targetId of trackedTabs) {
-    if (keep.has(targetId)) {
-      remaining.push(targetId);
+  for (const entry of trackedTabs) {
+    if (keep.has(entry.id)) {
+      remaining.push(entry);
       continue;
     }
-    const outcome = await closeTarget(targetId);
+    if (!all && entry.owner !== OWNER) {
+      remaining.push(entry);
+      continue;
+    }
+    const outcome = await closeTarget(entry.id);
     if (outcome === 'closed') closedCount++;
-    else if (outcome === 'failed') failed.push(targetId);
+    else if (outcome === 'failed') failed.push(entry.id);
     // closed / gone 都不再保留；failed 留待下次清理重试。
   }
 
-  saveTrackedTabs(remaining.concat(failed));
+  saveTrackedTabs(remaining.concat(failed.map(id => ({ id, owner: OWNER, createdAt: Date.now() }))));
   return { closed: closedCount, failed };
 }
 
@@ -288,14 +308,14 @@ async function prepareTarget(url, options = {}) {
   const { targetId: requestedTargetId = null, background = true } = options;
 
   return withTrackerLock(async () => {
-    const trackedIds = loadTrackedTabs();
+    const tracked = loadTrackedTabs();
     const targets = await getTargets();
 
     if (requestedTargetId) {
       const selected = targets.find(target => target.type === 'page' && target.id === requestedTargetId);
       if (!selected) throw new Error('指定的标签 ID 已失效，请重新运行 tabs list 获取当前 ID');
 
-      const isTracked = trackedIds.includes(selected.id);
+      const isTracked = tracked.some(tab => tab.id === selected.id);
       const shouldNavigate = url && url !== '-' && selected.url !== url;
       // 用户自己的标签只允许原地操作；带 URL 导航会覆盖他当前的页面，需显式放行。
       if (shouldNavigate && !isTracked && !options.allowUserNavigation) {
@@ -320,9 +340,11 @@ async function prepareTarget(url, options = {}) {
 
     if (!url || url === '-') throw new Error('未指定 URL 或 --target 标签 ID');
 
-    // 同一 URL 的自有标签直接复用，避免重复新建/关闭造成抖动。
+    // 只复用当前 owner 在同一个 URL 上的标签，避免和别的会话串台。
     const reusable = targets.find(target =>
-      target.type === 'page' && trackedIds.includes(target.id) && target.url === url
+      target.type === 'page'
+      && target.url === url
+      && tracked.some(tab => tab.id === target.id && tab.owner === OWNER)
     );
     if (reusable) {
       return { targetId: reusable.id, reused: true, created: false, tracked: true, navigated: false };
@@ -531,16 +553,23 @@ function parsedNumber(value, option, fallback, { allowZero = true } = {}) {
 }
 
 async function cmdTabs(action, args = []) {
+  const all = args.includes('--all');
+
   if (action === 'list') {
     const targets = await getTargets();
     const pages = targets.filter(t => t.type === 'page');
-    const tracked = new Set(loadTrackedTabs());
-    return pages.map(p => ({
-      id: p.id,
-      title: p.title,
-      url: p.url,
-      tracked: tracked.has(p.id)
-    }));
+    const tracked = new Map(loadTrackedTabs().map(tab => [tab.id, tab]));
+    return pages.map(p => {
+      const entry = tracked.get(p.id);
+      return {
+        id: p.id,
+        title: p.title,
+        url: p.url,
+        tracked: Boolean(entry),
+        owner: entry ? entry.owner : null,
+        mine: Boolean(entry && entry.owner === OWNER)
+      };
+    });
   }
 
   if (action === 'open') {
@@ -570,37 +599,39 @@ async function cmdTabs(action, args = []) {
     const pages = targets.filter(t => t.type === 'page');
 
     if (action === 'close') {
-      const pattern = args[0] || '';
-      const trackedIds = new Set(loadTrackedTabs());
+      const pattern = args.find(arg => !arg.startsWith('-')) || '';
+      const tracked = loadTrackedTabs();
       let closed = 0;
       const failed = [];
       const closedIds = new Set();
       for (const p of pages) {
-        if (trackedIds.has(p.id) && p.url.includes(pattern)) {
-          const outcome = await closeTarget(p.id);
-          if (outcome === 'closed') closed++;
-          if (outcome === 'failed') failed.push(p.id);
-          if (outcome !== 'failed') closedIds.add(p.id);
-        }
+        const entry = tracked.find(tab => tab.id === p.id);
+        if (!entry) continue;
+        if (!all && entry.owner !== OWNER) continue;
+        if (!p.url.includes(pattern)) continue;
+        const outcome = await closeTarget(p.id);
+        if (outcome === 'closed') closed++;
+        if (outcome === 'failed') failed.push(p.id);
+        if (outcome !== 'failed') closedIds.add(p.id);
       }
-      saveTrackedTabs(loadTrackedTabs().filter(id => !closedIds.has(id)));
-      return { closed, pattern, failed, scope: 'tracked tabs only' };
+      saveTrackedTabs(loadTrackedTabs().filter(entry => !closedIds.has(entry.id)));
+      return { closed, pattern, failed, scope: all ? 'all tracked tabs' : `owner ${OWNER}` };
     }
 
     if (action === 'close-id') {
-      const targetId = args[0];
+      const targetId = args.find(arg => !arg.startsWith('-'));
       if (!targetId || !pages.some(page => page.id === targetId)) {
         throw new Error('标签不存在；close-id 只会关闭明确指定的标签 ID');
       }
       const outcome = await closeTarget(targetId);
       if (outcome === 'failed') throw new Error(`关闭标签失败: ${targetId}`);
-      if (outcome === 'closed') saveTrackedTabs(loadTrackedTabs().filter(id => id !== targetId));
+      if (outcome === 'closed') saveTrackedTabs(loadTrackedTabs().filter(entry => entry.id !== targetId));
       return { closed: Number(outcome === 'closed'), targetId };
     }
 
     if (action === 'close-tracked') {
-      const result = await closeTrackedTabs();
-      return { closedTracked: result.closed, failed: result.failed };
+      const result = await closeTrackedTabs([], { all });
+      return { closedTracked: result.closed, failed: result.failed, scope: all ? 'all tracked tabs' : `owner ${OWNER}` };
     }
 
     throw new Error(`未知的 tabs 操作: ${action}`);
@@ -633,10 +664,15 @@ async function cmdPing() {
   }
 }
 
-async function cmdCleanup(keepIds = []) {
+async function cmdCleanup(keepIds = [], { all = false } = {}) {
   return withTrackerLock(async () => {
-    const result = await closeTrackedTabs(keepIds);
-    return { cleanedUp: result.closed, failed: result.failed, keptTracked: keepIds };
+    const result = await closeTrackedTabs(keepIds, { all });
+    return {
+      cleanedUp: result.closed,
+      failed: result.failed,
+      keptTracked: keepIds,
+      scope: all ? 'all tracked tabs' : `owner ${OWNER}`
+    };
   });
 }
 
@@ -663,12 +699,12 @@ CDP 浏览器自动化执行器
   fill <url|-> <selector> <value> [--timeout <ms>] [--target <id>]  填写文本控件
   press <url|-> <selector> <key> [--timeout <ms>] [--target <id>]  发送按键
   scroll <url|-> <selector> <direction> [amount] [--timeout <ms>] [--target <id>]  滚动元素或页面
-  tabs list                      列出所有标签
-  tabs close <pattern>           关闭匹配的自有标签
-  tabs close-id <targetId>       关闭明确指定的标签
-  tabs close-tracked             关闭之前创建的所有标签
-  tabs open <url...>             后台打开或复用标签（可一次多个），不关闭其他标签
-  cleanup [--keep <id,id,...>]   任务结束后统一关闭自有标签，可保留指定标签
+  tabs list                      列出标签（含 owner / mine）
+  tabs close <pattern> [--all]   关闭匹配的本会话标签；--all 含其他会话
+  tabs close-id <targetId>       关闭明确指定的标签（任意归属）
+  tabs close-tracked [--all]     关闭本会话创建的标签；--all 关闭全部
+  tabs open <url...>             后台打开或复用本会话标签（可一次多个）
+  cleanup [--keep <ids>] [--all]  任务结束关闭本会话标签；--all 全局清理
   ping                           测试连接
 
 页面命令可加 --navigate-user-tab 才允许用 URL 导航用户标签；不提供任何前台/激活参数。
@@ -676,7 +712,7 @@ CDP 浏览器自动化执行器
 特性:
   - 所有标签都在后台打开与操作，不提供前台/激活能力，不抢占用户焦点
   - 不关闭用户标签；cleanup 只关闭本脚本创建并追踪的标签
-  - 相同 URL 复用自有标签，避免重复新建/关闭
+  - 标签按 owner 隔离（CDP_OWNER / DSH_SESSION_ID），同 URL 只复用本会话标签
   - 页面命令不再隐式关闭任何标签
   - 所有浏览器操作仅作用于指定标签或脚本创建的标签；过期 ID 会拒绝执行
   - 按浏览器会话隔离追踪文件，并使用文件锁协调并发操作
@@ -685,6 +721,7 @@ CDP 浏览器自动化执行器
 环境变量:
   CDP_HOST  CDP 主机 (默认: 127.0.0.1)
   CDP_PORT  CDP 端口 (默认: 9222)
+  CDP_OWNER 标签归属标识 (默认: DSH_SESSION_ID 或 default)
 `);
     return;
   }
@@ -802,7 +839,7 @@ CDP 浏览器自动化执行器
       case 'cleanup': {
         const keepIdx = args.indexOf('--keep');
         const keepIds = keepIdx === -1 ? [] : (args[keepIdx + 1] || '').split(',').filter(Boolean);
-        result = await cmdCleanup(keepIds);
+        result = await cmdCleanup(keepIds, { all: args.includes('--all') });
         break;
       }
 

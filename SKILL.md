@@ -2,7 +2,7 @@
 name: cdp-browser
 description: "通过 Chrome DevTools Protocol (CDP) 连接已运行的浏览器，执行页面快照、交互、数据提取和标签管理。当用户要求连接调试端口、读取网页、操作页面、截图或管理标签时使用。默认后台新建标签、任务结束后统一清理，不关闭用户标签；关闭浏览器、重启浏览器、关闭用户标签、点击提交/删除/购买/发送类控件前，必须先取得用户明确授权。"
 metadata:
-  version: "1.17.0"
+  version: "1.18.0"
 ---
 
 # CDP 浏览器自动化
@@ -127,7 +127,7 @@ $shortcut.Save()
 - **不提供任何前台/激活能力**：`--foreground`、`--user-requested-foreground` 一律报错退出；标签只在后台打开和操作，绝不抢用户焦点。
 - **不要绕过技能抢焦点**：禁止用 `/json/new`、`/json/activate`、`Page.bringToFront` 等原生接口开或激活标签；新建一律用 `tabs open`（后台）。用户说“别打扰我”时，连新窗口都不要弹。
 - **不要为了截图/调试去改应用、插件或前端的启动参数**：不要往 Electron / 桌面程序 / 前端代码里塞 `--remote-debugging-port` 之类的参数，也不要把桌面应用窗口当网页标签来操控；要验证 UI 就用浏览器打开网页或本地预览页，并后台打开。
-- 收尾只关自己开的：优先 `tabs close-id <id>`。`cleanup` 会关闭追踪文件里的全部标签，而 `tabs list` 里 `tracked=true` 的标签可能来自早先会话（例如用户自己的购物页、工单页），跑之前必须核对清单。
+- 收尾只关自己开的：优先 `tabs close-id <id>`。`cleanup` / `tabs close` / `close-tracked` **默认只动本会话（owner）的标签**；加 `--all` 才会连别的会话和历史遗留一起关，执行前必须确认没有其他会话正在用浏览器。
 
 **细则**
 
@@ -136,9 +136,18 @@ $shortcut.Save()
 3. **用户指定已有标签时，只使用用户的标签，不新建任何标签**。先用 `tabs list` 找到目标标签 ID，之后所有页面命令都带 `--target <id>`；需要原地操作时 URL 位置传 `-`。**只对 `tracked=false` 的用户标签做保护**：带 URL 导航它会被拒绝（避免覆盖他当前的页面），确实要导航必须显式加 `--navigate-user-tab`；自有标签带 URL 则正常导航。注意这只对**已连接实例内**的标签成立；独立调试实例看不到用户原窗口的标签，需要请其在该窗口重新打开。
 4. **不关闭用户标签**。用户标签不进入追踪，`cleanup`、`tabs close` 都不会碰它；任务结束后也不得关闭。只有用户明确要求关闭某个标签时，才可用 `tabs close-id <id>` 精确关闭。
 5. **新建标签一律后台，没有前台参数**。`tabs open` 固定 `background=true`，收到 `--foreground` / `--user-requested-foreground` 直接报错退出。用户标签被冻结时不要试图激活它，改用 `tabs open` 新标签，或请用户自己点开那个标签。
-6. **任务结束统一清理**。收尾用 `tabs close-id` 精确关掉本次任务自己开的标签；要留给用户查看的标签保留并在最后说明。`cleanup` 只在确认追踪清单里全是本次任务标签时才用，否则会把历史会话的标签一起关掉。不要每条命令后都 `cleanup` 或 `tabs close`。
+6. **任务结束统一清理**。收尾用 `tabs close-id` 精确关掉本次任务自己开的标签；`cleanup` 默认只关本会话标签，加 `--all` 才会全局清理。要留给用户查看的标签保留并在最后说明，不要每条命令后都 `cleanup`。
 7. **能并行就并行**。需要多个页面时，用一次 `tabs open <url1> <url2> ...` 批量后台打开，或并发执行多次命令；各自用 `--target` 指向自己的标签。追踪文件带文件锁，并发安全。
 8. **外部变更需授权**。点击提交、删除、购买、发送等会造成外部变更的控件前，必须取得用户明确授权；填写内容本身不代表允许提交。
+
+## 多会话共用浏览器（约定）
+
+- **归属自动判定**：`CDP_OWNER` > `DSH_SESSION_ID` > `default`。同一台机器上不同会话天然是不同的 owner，不需要手工设置。
+- **默认隔离**：`cleanup`、`tabs close`、`tabs close-tracked` 只处理本会话的标签；`tabs list` 用 `owner` / `mine` 认领，不要靠数量猜。
+- **同一 URL 只复用本会话的标签**：两个会话同时开同一个 URL 会各开一个，不会串台；跨会话不会共用标签。
+- **`--all` 是唯一的全局清理**：会关闭其他会话的标签和旧版遗留（owner=`legacy`）的跟踪标签，执行前确认没有别的会话正在用浏览器。
+- **不要共享同一个标签做交互**：两个会话同时用 `--target` 点同一个标签，动作会交错、结果不确定；要并行就各开各的。
+- **用户标签永远安全**：不进入追踪，任何 owner 都关不掉。
 
 ## 使用入口
 
@@ -153,7 +162,7 @@ node "$SKILLS_ROOT/cdp-browser/scripts/launch_debug_browser.mjs"   # 一个端�
 
 | 命令 | 返回 |
 |---|---|
-| `tabs list` | 数组，每项 `id`、`title`、`url`、`tracked`；覆盖所有窗口，不区分窗口归属 |
+| `tabs list` | 数组，每项 `id`、`title`、`url`、`tracked`、`owner`、`mine`；覆盖所有窗口 |
 | `tabs open` | 单个 URL 返回扁平对象（`targetId`、`url`、`newTab`、`reusedTab`、`background`）；多个 URL 返回 `{ tabs: [...] }` |
 | `extract` | `title`、`url`、`lines`、`totalLines`、`targetId`、`newTab`、`reusedTab` |
 | `eval` | `result`（页面表达式返回值） |
@@ -162,7 +171,7 @@ node "$SKILLS_ROOT/cdp-browser/scripts/launch_debug_browser.mjs"   # 一个端�
 | `click` | `action`、`selector`、`element`、`x`、`y` |
 | `fill` | `action`、`selector`、`element`、`changed`、`valueLength`（**不回显输入内容**，要核对就再 `eval` 读一次） |
 | `press` / `scroll` | `action`、`selector`、`element`（按键会发送 keydown/keyup，可能触发页面监听和默认行为，例如 Enter 提交表单） |
-| `cleanup` | `cleanedUp`、`failed`、`keptTracked` |
+| `cleanup` | `cleanedUp`、`failed`、`keptTracked`、`scope`（`owner <id>` 或 `all tracked tabs`） |
 
 ### 复杂 JS 用 `--file`，不要塞进命令行
 
@@ -192,7 +201,7 @@ node scripts/cdp_executor.mjs click <url|-> <selector> [--target <id>]
 node scripts/cdp_executor.mjs fill <url|-> <selector> <value> [--target <id>]
 node scripts/cdp_executor.mjs press <url|-> <selector> <key> [--target <id>]
 node scripts/cdp_executor.mjs scroll <url|-> <selector> <direction> [amount] [--target <id>]
-node scripts/cdp_executor.mjs cleanup [--keep <id,id,...>]
+node scripts/cdp_executor.mjs cleanup [--keep <id,id,...>] [--all]
 ```
 
 ## 脚本结构
@@ -212,7 +221,7 @@ node scripts/cdp_executor.mjs cleanup [--keep <id,id,...>]
 | 命令 | 作用 |
 |---|---|
 | `ping` | 检查 CDP 连接 |
-| `tabs list` | 列出页面标签及其 `tracked` 状态；只读取，不关闭 |
+| `tabs list` | 列出页面标签及 `tracked`/`owner`/`mine`；只读取，不关闭 |
 | `tabs open <url...>` | 固定后台打开或复用标签，可一次传多个 URL；不关闭其他标签。任何前台/激活参数都会报错退出 |
 | `extract <url> [--wait ms]` | 提取标题、当前 URL 和最多 200 行页面文本 |
 | `eval <url|-> <js-code> | --file <path> | --stdin [--wait ms]` | 执行页面 JavaScript；复杂 JS 用 `--file` 或 `--stdin`，避免 PowerShell 吞引号 |
@@ -223,18 +232,18 @@ node scripts/cdp_executor.mjs cleanup [--keep <id,id,...>]
 | `fill <url> <selector> <value> [--timeout ms]` | 等待并填写文本 input、textarea 或 contenteditable |
 | `press <url> <selector> <key> [--timeout ms]` | 聚焦元素并发送按键，支持 `Control+A` 等组合键 |
 | `scroll <url> <selector> <direction> [amount] [--timeout ms]` | 滚动最近的可滚动祖先或页面，amount 为 1–10000 |
-| `tabs close <pattern>` | 关闭 URL 匹配的自有标签 |
+| `tabs close <pattern> [--all]` | 关闭 URL 匹配的本会话标签；`--all` 含其他会话 |
 | `tabs close-id <targetId>` | 关闭明确指定的标签（用户要求关闭用户标签时才用） |
-| `tabs close-tracked` / `cleanup` | 任务结束后关闭本脚本创建并追踪的所有标签 |
+| `tabs close-tracked [--all]` / `cleanup [--all]` | 关闭本会话创建的标签；`--all` 关闭全部追踪标签 |
 | `cleanup --keep <id,id,...>` | 关闭其他自有标签并保留指定标签 |
 
 页面命令可附加 `--target <id>` 精确选择现有标签；不提供前台参数（传 `--foreground` 会报错），附加 `--navigate-user-tab` 才会允许用 URL 导航用户标签。若不需要导航，在 URL 位置传 `-`，例如 `click - "button.search" --target TARGET_ID`。不传 `--target` 时，页面命令只复用 URL 相同的自有标签，没有才新建，且不关闭其他标签。`tabs open` 传一个 URL 时返回扁平对象（含 `targetId`），传多个时返回 `{ tabs: [...] }`。
 
 ## 标签归属与清理
 
-- 只有脚本自己创建并追踪的标签会被清理；用户已有标签只允许读取列表，或通过 `--target` 使用。`tabs list` 是实时快照，数量变化也可能来自用户自己开关标签；脚本只在显式 `tabs close*` / `cleanup` 时关闭标签。
+- 只有脚本自己创建并追踪的标签会被清理，而且**默认只清理本会话 owner 的**；用户已有标签只允许读取列表，或通过 `--target` 使用。`tabs list` 是实时快照，数量变化也可能来自用户自己开关标签；脚本只在显式 `tabs close*` / `cleanup` 时关闭标签。
 - **用户标签可能被浏览器冻结或后台挂起**（长时间没激活的标签常见）：命令会先做 2.5 秒探活，失败时返回“标签无响应：可能已冻结或在后台挂起”，**不要试图激活它**（技能没有前台能力）；直接 `tabs open` 新标签重建，或请用户自己点开那个标签，不要在同一个标签上反复重试。
-- **`tracked=true` 不等于“本次任务创建的”**：追踪文件会跨会话留存，`tabs list` 里可能挂着用户很早以前由脚本打开的标签。`cleanup`、`tabs close-tracked` 会把它们全部关闭，因此收尾优先用 `tabs close-id` 逐个关自己开的标签；确实要 `cleanup` 时先读一遍清单确认。
+- **`tracked=true` 不等于“本次任务创建的”**：追踪文件会跨会话留存，`tabs list` 里可能挂着别的会话或很早以前的标签。看 `owner`/`mine` 区分；`cleanup` 默认只关 `mine=true` 的，`--all` 才会连历史与别人的一起关。
 - `tabs open` 支持 `file://` 本地页面，自测时不需要外网。路径含中文或空格时整体加引号，例如 `"file:///C:/Users/Lenovo/测试 页.html"`；能避免时优先用 ASCII 文件名。
 - 脚本创建标签时记录在系统临时目录下、以浏览器调试会话标识区分的追踪文件内，写入使用文件锁和原子替换；不得把旧版共享追踪文件里的标签 ID 当作本会话自有标签。
 - 每次操作前刷新标签列表；过期 ID 会报错并停止，不会猜测替代标签。URL 位置传 `-` 表示不导航当前标签。
